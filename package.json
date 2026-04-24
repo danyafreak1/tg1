@@ -1,0 +1,20 @@
+{
+  "name": "telegram-video-sticker-mvp",
+  "version": "1.0.0",
+  "description": "Local Windows MVP for Telegram video sticker conversion with shared backend, web UI, bot, and ngrok-ready public access.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "telegraf": "^4.16.3"
+  }
+}

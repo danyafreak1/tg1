@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sticker Admin</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/admin.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Admin</p>
+        <h1>Sticker Registry</h1>
+      </section>
+
+      <section class="card admin-toolbar">
+        <label class="token-field">
+          <span>Admin token</span>
+          <input id="admin-token" type="password" placeholder="ADMIN_TOKEN from .env" />
+        </label>
+        <label class="token-field">
+          <span>Search by upload name</span>
+          <input id="search-query" type="text" placeholder="example: cat.mp4 or image.png" />
+        </label>
+        <button id="save-token" type="button">Save token</button>
+        <button id="refresh-admin" type="button">Refresh</button>
+      </section>
+
+      <section class="card">
+        <p id="admin-error" class="error hidden"></p>
+        <div id="admin-list" class="admin-list"></div>
+      </section>
+    </main>
+
+    <script src="/admin.js" type="module"></script>
+  </body>
+</html>

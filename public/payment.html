@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Funchu Payment Mini App</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/payment.css" />
+  </head>
+  <body>
+    <main class="shell payment-shell">
+      <section class="hero">
+        <p class="eyebrow">Telegram Mini App Stub</p>
+        <h1>Choose a plan</h1>
+        <p class="lead">
+          This is a placeholder payment flow for the bot. Buttons below simulate a checkout step
+          and can later be wired to Telegram Payments or another provider.
+        </p>
+      </section>
+
+      <section class="payment-grid">
+        <article class="card payment-card" data-plan="starter">
+          <p class="plan-badge">Starter</p>
+          <h2>$4.99</h2>
+          <p class="plan-copy">Small pack of credits for casual sticker creation.</p>
+          <button type="button" class="pay-button" data-plan="starter" data-price="$4.99">Pay Starter</button>
+        </article>
+
+        <article class="card payment-card featured" data-plan="creator">
+          <p class="plan-badge">Creator</p>
+          <h2>$9.99</h2>
+          <p class="plan-copy">Balanced plan for active sticker pack building.</p>
+          <button type="button" class="pay-button" data-plan="creator" data-price="$9.99">Pay Creator</button>
+        </article>
+
+        <article class="card payment-card" data-plan="studio">
+          <p class="plan-badge">Studio</p>
+          <h2>$19.99</h2>
+          <p class="plan-copy">High-volume tier for frequent uploads and experiments.</p>
+          <button type="button" class="pay-button" data-plan="studio" data-price="$19.99">Pay Studio</button>
+        </article>
+      </section>
+
+      <section class="card payment-status-card">
+        <div class="section-head">
+          <h2>Payment status</h2>
+          <span id="user-chip" class="user-chip">User: unknown</span>
+        </div>
+        <p id="payment-status">Pick any tariff to simulate a successful payment.</p>
+      </section>
+    </main>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="/payment.js" type="module"></script>
+  </body>
+</html>
