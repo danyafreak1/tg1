@@ -60,6 +60,9 @@ export class StorageService {
       await this.removeFile(job.inputPath);
       await this.removeFile(job.generatedSourcePath);
       await this.removeFile(job.outputPath);
+      for (const filePath of job.cleanupPaths || []) {
+        await this.removeFile(filePath);
+      }
       jobs.delete(job.id);
     }
   }

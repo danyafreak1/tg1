@@ -6,12 +6,13 @@ import { AppError } from '../utils/errors.js';
 import { createId } from '../utils/ids.js';
 
 export class BackendService extends EventEmitter {
-  constructor({ storage, converter, queue, imageGenerationService = null }) {
+  constructor({ storage, converter, queue, imageGenerationService = null, videoGenerationService = null }) {
     super();
     this.storage = storage;
     this.converter = converter;
     this.queue = queue;
     this.imageGenerationService = imageGenerationService;
+    this.videoGenerationService = videoGenerationService;
     this.jobs = new Map();
   }
 
@@ -57,6 +58,8 @@ export class BackendService extends EventEmitter {
     try {
       const result = job.jobType === 'generate_sticker'
         ? await this.handleGeneratedStickerJob(job)
+        : job.jobType === 'generate_video'
+          ? await this.handleGeneratedVideoJob(job)
         : job.jobType === 'generate_image'
           ? await this.handleGeneratedImageJob(job)
           : await this.converter.convert({
@@ -73,6 +76,9 @@ export class BackendService extends EventEmitter {
       job.outputPath = result.outputPath || job.outputPath;
       if (result.generatedSourcePath) {
         job.generatedSourcePath = result.generatedSourcePath;
+      }
+      if (result.cleanupPaths) {
+        job.cleanupPaths = result.cleanupPaths;
       }
       if (result.originalName && job.originalName === 'prompt-only') {
         job.originalName = result.originalName;
@@ -172,6 +178,41 @@ export class BackendService extends EventEmitter {
       revisedPrompt: generated.revisedPrompt || null,
       generatedSourcePath: generated.generatedSourcePath || generated.outputPath,
       originalName: generated.originalName || path.basename(generated.outputPath)
+    };
+  }
+
+  async handleGeneratedVideoJob(job) {
+    if (!this.videoGenerationService) {
+      throw new AppError('AI video generation service is not configured.', 500);
+    }
+
+    job.progressStage = 'generating';
+    job.progressDetail = 'Generating video';
+    job.updatedAt = new Date().toISOString();
+    this.emit('job.updated', { job: this.toPublicJob(job), internalJob: job });
+
+    const generated = await this.videoGenerationService.generateVideo({
+      jobId: job.id,
+      referenceImagePath: job.inputPath,
+      promptMode: job.options?.promptMode || 'custom',
+      prompt: job.options?.prompt || ''
+    });
+
+    job.progressStage = 'converting';
+    job.progressDetail = 'Preparing preview';
+    job.updatedAt = new Date().toISOString();
+    this.emit('job.updated', { job: this.toPublicJob(job), internalJob: job });
+
+    const stats = await fs.stat(generated.outputPath);
+
+    return {
+      outputPath: generated.outputPath,
+      size: stats.size,
+      format: 'video',
+      provider: generated.provider,
+      revisedPrompt: generated.effectivePrompt || null,
+      generatedSourcePath: generated.outputPath,
+      cleanupPaths: generated.cleanupPaths || []
     };
   }
 

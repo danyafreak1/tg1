@@ -1,4 +1,4 @@
-import path from 'node:path';
+﻿import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { Telegraf, Markup } from 'telegraf';
 import { config } from '../config/env.js';
@@ -6,7 +6,8 @@ import { AppError } from '../utils/errors.js';
 import { createId } from '../utils/ids.js';
 import { StickerSetService } from './stickerSetService.js';
 
-const DEFAULT_EMOJI = '🫥';
+const DEFAULT_EMOJI = String.fromCodePoint(0x1FAE5);
+const STAR_TOKEN_PACKAGES = [1, 3, 5, 10, 25];
 
 function helpText(baseUrl) {
   return [
@@ -15,7 +16,7 @@ function helpText(baseUrl) {
     'Команды:',
     '/start - краткое приветствие',
     '/help - помощь',
-    '/pay - открыть мини-приложение оплаты',
+    '/pay - buy AI video tokens with Telegram Stars',
     '/gen - сгенерировать стикер по prompt',
     '/sets - ваши наборы, созданные этим ботом',
     '/newpack - создать новый набор из последнего готового стикера',
@@ -44,19 +45,42 @@ function buildCornerChoiceKeyboard(userId, mode) {
   ]);
 }
 
-function buildPaymentUrl(userId) {
-  const params = new URLSearchParams({
-    user_id: String(userId)
-  });
-  return `${config.baseUrl}/payment.html?${params.toString()}`;
+function buildStarsPackageLabel(amount) {
+  const tokenWord = amount === 1 ? 'Token' : 'Tokens';
+  return `${amount} ${tokenWord} - ${amount} ${String.fromCodePoint(0x2B50)}`;
 }
 
-function buildPaymentKeyboard(userId) {
+function buildStarsPaymentKeyboard(userId) {
+  return Markup.inlineKeyboard(
+    [1, 3, 5, 10, 25].map((amount) => [
+      Markup.button.callback(buildStarsPackageLabel(amount), `buytokens:${userId}:${amount}`)
+    ])
+  );
+}
+
+function buildBuyTokensText(balance) {
+  return [
+    `AI video sticker needs ${config.aiVideoTokenCost} ${formatTokenWord(config.aiVideoTokenCost)}. You now have ${balance} ${formatTokenWord(balance)}.`,
+    '',
+    'Buy tokens with Telegram Stars:'
+  ].join('\n');
+}
+
+function buildLanguageKeyboard(userId) {
   return Markup.inlineKeyboard([
     [
-      Markup.button.webApp('Open Payment Mini App', buildPaymentUrl(userId))
+      Markup.button.callback('Русский', `setlang:${userId}:ru`),
+      Markup.button.callback('English', `setlang:${userId}:en`)
     ]
   ]);
+}
+
+function buildLanguagePrompt() {
+  return [
+    'Choose your language / Выберите язык',
+    '',
+    'You can change it later with /language.'
+  ].join('\n');
 }
 
 function extractMedia(message) {
@@ -175,10 +199,10 @@ function buildPackTitle(title, botUsername) {
 
 function transliterateCyrillic(input) {
   const map = {
-    а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z',
-    и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r',
-    с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'ts', ч: 'ch', ш: 'sh',
-    щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya'
+    '\u0430': 'a', '\u0431': 'b', '\u0432': 'v', '\u0433': 'g', '\u0434': 'd', '\u0435': 'e', '\u0451': 'e', '\u0436': 'zh', '\u0437': 'z',
+    '\u0438': 'i', '\u0439': 'y', '\u043a': 'k', '\u043b': 'l', '\u043c': 'm', '\u043d': 'n', '\u043e': 'o', '\u043f': 'p', '\u0440': 'r',
+    '\u0441': 's', '\u0442': 't', '\u0443': 'u', '\u0444': 'f', '\u0445': 'h', '\u0446': 'ts', '\u0447': 'ch', '\u0448': 'sh',
+    '\u0449': 'sch', '\u044a': '', '\u044b': 'y', '\u044c': '', '\u044d': 'e', '\u044e': 'yu', '\u044f': 'ya'
   };
 
   return input
@@ -263,6 +287,13 @@ function buildLayoutKeyboard({ userId, inputType, aiVideoTokens = 0 }) {
   return Markup.inlineKeyboard(rows);
 }
 
+function buildAiVideoPromptModeKeyboard(userId) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('✍️ Ввести prompt', `aivideomode:${userId}:custom`)],
+    [Markup.button.callback('🎲 Случайный', `aivideomode:${userId}:random`)]
+  ]);
+}
+
 function buildNewPackPreview({ title, shortName, botUsername, emoji }) {
   return [
     'Проверьте новый набор:',
@@ -270,6 +301,36 @@ function buildNewPackPreview({ title, shortName, botUsername, emoji }) {
     `Short name: ${shortName}_by_${botUsername.toLowerCase()}`,
     `Emoji: ${emoji}`
   ].join('\n');
+}
+
+function looksLikeMojibake(value) {
+  const text = String(value || '');
+  return /Р|Ð|Ñ|вЂ|Ѓ|Ћ|Ў|В°|С•|С—/.test(text);
+}
+
+function deriveStickerSetTitle(name) {
+  const base = String(name || '')
+    .replace(/_by_[a-z0-9_]+$/i, '')
+    .replace(/_+/g, ' ')
+    .trim();
+
+  if (!base) {
+    return 'Sticker Pack';
+  }
+
+  return base
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+function getStickerSetDisplayTitle(set) {
+  const title = String(set?.title || '').trim();
+  if (!title || looksLikeMojibake(title)) {
+    return deriveStickerSetTitle(set?.name);
+  }
+  return title;
 }
 
 function estimateWaitSeconds({ queueSize = 0, kind = 'generate' }) {
@@ -398,6 +459,8 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       return;
     }
 
+    const inferredLanguage = String(ctx.from.language_code || '').toLowerCase().startsWith('ru') ? 'ru' : 'en';
+
     await userState.updateUser(ctx.from.id, (current) => ({
       ...current,
       profile: {
@@ -406,6 +469,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         firstName: ctx.from.first_name || null,
         lastName: ctx.from.last_name || null,
         languageCode: ctx.from.language_code || null,
+        selectedLanguage: current.profile?.selectedLanguage || inferredLanguage,
         updatedAt: new Date().toISOString()
       },
       balances: {
@@ -417,7 +481,8 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
   await bot.telegram.setMyCommands([
     { command: 'start', description: 'Start the bot' },
     { command: 'help', description: 'Show help and flow' },
-    { command: 'pay', description: 'Open payment mini app' },
+    { command: 'language', description: 'Choose bot language' },
+    { command: 'pay', description: 'Buy AI video tokens with Stars' },
     { command: 'gen', description: 'Generate a sticker from prompt' },
     { command: 'sets', description: 'List your sticker sets created by this bot' },
     { command: 'newpack', description: 'Create a new sticker pack from the last sticker' },
@@ -562,12 +627,9 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     }));
   }
 
-  async function prepareAiVideoReferenceFromLast(userId) {
-    const user = await userState.getUser(userId);
-    const sourcePath = user.lastConverted?.path;
-
+  async function prepareAiVideoReferenceDraft(userId, sourcePath, extra = {}) {
     if (!sourcePath) {
-      throw new AppError('No sticker available for AI video reference.');
+      throw new AppError('No image available for AI video reference.');
     }
 
     const outputPath = storage.createUploadPath(`ai-video-reference-${path.basename(sourcePath, path.extname(sourcePath))}.png`);
@@ -576,26 +638,297 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       outputPath
     });
 
+    const draft = {
+      referenceImagePath: outputPath,
+      sourcePath,
+      sourceStickerPath: extra.sourceStickerPath || null,
+      sourceOriginalName: extra.sourceOriginalName || path.basename(sourcePath),
+      preparedAt: new Date().toISOString()
+    };
+
     await userState.updateUser(userId, (current) => ({
       ...current,
-      aiVideoDraft: {
-        referenceImagePath: outputPath,
-        sourceStickerPath: sourcePath,
-        preparedAt: new Date().toISOString()
+      aiVideoDraft: draft
+    }));
+
+    return draft;
+  }
+
+  async function prepareAiVideoReferenceFromLast(userId) {
+    const user = await userState.getUser(userId);
+    const sourcePath = user.lastConverted?.path;
+
+    if (!sourcePath) {
+      throw new AppError('No sticker available for AI video reference.');
+    }
+
+    return prepareAiVideoReferenceDraft(userId, sourcePath, {
+      sourceStickerPath: sourcePath,
+      sourceOriginalName: user.lastConverted?.sourceOriginalName || path.basename(sourcePath)
+    });
+  }
+
+  async function createAdminThumbnailFromSticker(stickerPath) {
+    const fileName = `admin-thumb-${createId('st_')}.png`;
+    const outputPath = path.join(config.publicDir, fileName);
+    await backend.converter.prepareAdminThumbnail({
+      inputPath: stickerPath,
+      outputPath,
+      maxSide: 50
+    });
+
+    return {
+      outputPath,
+      publicUrl: `${config.baseUrl}/${fileName}`
+    };
+  }
+
+  async function grantAiVideoTokens(userId, tokenAmount) {
+    let nextBalance = config.initialAiVideoTokens;
+
+    await userState.updateUser(userId, (current) => {
+      const currentBalance = Number(current.balances?.aiVideoTokens || 0);
+      nextBalance = currentBalance + tokenAmount;
+
+      return {
+        ...current,
+        balances: {
+          ...current.balances,
+          aiVideoTokens: nextBalance
+        }
+      };
+    });
+
+    return nextBalance;
+  }
+
+  async function spendAiVideoTokens(userId, tokenAmount) {
+    let nextBalance = 0;
+    let spent = false;
+
+    await userState.updateUser(userId, (current) => {
+      const currentBalance = Number(current.balances?.aiVideoTokens || 0);
+      if (currentBalance < tokenAmount) {
+        nextBalance = currentBalance;
+        return current;
+      }
+
+      spent = true;
+      nextBalance = currentBalance - tokenAmount;
+      return {
+        ...current,
+        balances: {
+          ...current.balances,
+          aiVideoTokens: nextBalance
+        }
+      };
+    });
+
+    if (!spent) {
+      throw new AppError('Not enough AI video tokens.');
+    }
+
+    return nextBalance;
+  }
+
+  async function setAiVideoChargePending(userId, charge) {
+    await userState.updateUser(userId, (current) => ({
+      ...current,
+      aiVideoChargePending: charge
+    }));
+  }
+
+  async function clearAiVideoChargePending(userId, jobId = null) {
+    await userState.updateUser(userId, (current) => {
+      if (jobId && current.aiVideoChargePending?.jobId !== jobId) {
+        return current;
+      }
+
+      return {
+        ...current,
+        aiVideoChargePending: null
+      };
+    });
+  }
+
+  async function confirmAiVideoCharge(userId, jobId) {
+    let nextBalance = 0;
+    let applied = false;
+
+    await userState.updateUser(userId, (current) => {
+      const pending = current.aiVideoChargePending;
+      if (!pending || pending.jobId !== jobId) {
+        nextBalance = Number(current.balances?.aiVideoTokens || 0);
+        return current;
+      }
+
+      const currentBalance = Number(current.balances?.aiVideoTokens || 0);
+      const amount = Number(pending.amount || 0);
+      nextBalance = Math.max(0, currentBalance - amount);
+      applied = true;
+
+      return {
+        ...current,
+        aiVideoChargePending: null,
+        balances: {
+          ...current.balances,
+          aiVideoTokens: nextBalance
+        }
+      };
+    });
+
+    return { nextBalance, applied };
+  }
+
+  function getAvailableAiVideoTokens(user) {
+    const balance = Number(user?.balances?.aiVideoTokens || 0);
+    const pending = Number(user?.aiVideoChargePending?.amount || 0);
+    return Math.max(0, balance - pending);
+  }
+
+  async function promptForAiVideoMode(ctx, draft) {
+    await userState.updateUser(ctx.from.id, (current) => ({
+      ...current,
+      aiVideoDraft: draft,
+      pendingAction: {
+        type: 'ai_video_choose_prompt_mode',
+        payload: {
+          referenceImagePath: draft.referenceImagePath,
+          sourcePath: draft.sourcePath,
+          sourceOriginalName: draft.sourceOriginalName || 'ai-video-reference.png'
+        }
       }
     }));
 
-    return { outputPath };
+    await ctx.reply(
+      'Как подготовить AI video sticker?',
+      buildAiVideoPromptModeKeyboard(ctx.from.id)
+    );
   }
 
-  bot.start((ctx) => ctx.reply(helpText(config.baseUrl), buildPaymentKeyboard(ctx.from.id)));
-  bot.help((ctx) => ctx.reply(helpText(config.baseUrl)));
+  async function enqueueAiVideoJob(ctx, payload, { promptMode, prompt = '', existingStatusMessageId = null }) {
+    const currentUser = await userState.getUser(ctx.from.id);
+    if (currentUser.aiVideoChargePending?.jobId) {
+      throw new AppError('AI video generation is already running. Wait for the current one to finish.');
+    }
+
+    const availableBalance = getAvailableAiVideoTokens(currentUser);
+    if (availableBalance < config.aiVideoTokenCost) {
+      throw new AppError('Not enough AI video tokens.');
+    }
+
+    const statusMessageId = existingStatusMessageId || (await createStatusMessage(ctx)).message_id;
+    const job = await backend.createJobFromUpload({
+      inputPath: payload.referenceImagePath,
+      originalName: payload.sourceOriginalName || 'ai-video-reference.png',
+      source: 'bot',
+      owner: {
+        chatId: ctx.chat.id,
+        userId: ctx.from.id
+      },
+      options: {
+        jobType: 'generate_video',
+        inputType: 'video',
+        outputExtension: '.mp4',
+        promptMode,
+        prompt
+      }
+    });
+
+    await setAiVideoChargePending(ctx.from.id, {
+      jobId: job.id,
+      amount: config.aiVideoTokenCost,
+      createdAt: new Date().toISOString()
+    });
+    await rememberStatusMessage(ctx.chat.id, job.id, statusMessageId);
+    await updateStatusMessage(job);
+    return availableBalance - config.aiVideoTokenCost;
+  }
+
+  async function setSelectedLanguage(userId, selectedLanguage) {
+    await userState.updateUser(userId, (current) => ({
+      ...current,
+      profile: {
+        ...(current.profile || {}),
+        selectedLanguage,
+        updatedAt: new Date().toISOString()
+      }
+    }));
+  }
+
+  async function promptForLanguageSelection(ctx) {
+    await ctx.reply(buildLanguagePrompt(), buildLanguageKeyboard(ctx.from.id));
+  }
+
+  async function sendStarsInvoice(ctx, tokenAmount) {
+    const tokenWord = tokenAmount === 1 ? 'Token' : 'Tokens';
+    const title = `${tokenAmount} AI Video ${tokenWord}`;
+    const description = `Adds ${tokenAmount} ${tokenWord.toLowerCase()} for AI video sticker generation.`;
+    const payload = `ai_video_tokens:${tokenAmount}:${createId('stars_')}`;
+
+    await ctx.telegram.callApi('sendInvoice', {
+      chat_id: ctx.chat.id,
+      title,
+      description,
+      payload,
+      provider_token: '',
+      currency: 'XTR',
+      prices: [
+        {
+          label: `${tokenAmount} ${tokenWord}`,
+          amount: tokenAmount
+        }
+      ],
+      start_parameter: `ai-video-${tokenAmount}`
+    });
+  }
+
+  bot.start(async (ctx) => {
+    await syncUserProfile(ctx);
+    await ctx.reply(helpText(config.baseUrl));
+  });
+  bot.help(async (ctx) => {
+    await syncUserProfile(ctx);
+    await ctx.reply(helpText(config.baseUrl));
+  });
+
+  bot.command('language', async (ctx) => {
+    await syncUserProfile(ctx);
+    await promptForLanguageSelection(ctx);
+  });
 
   bot.command('pay', async (ctx) => {
     await syncUserProfile(ctx);
+    const user = await userState.getUser(ctx.from.id);
+    const balance = Number(user.balances?.aiVideoTokens || 0);
+    await ctx.reply(buildBuyTokensText(balance), buildStarsPaymentKeyboard(ctx.from.id));
+  });
+
+  bot.on('pre_checkout_query', async (ctx) => {
+    await ctx.telegram.callApi('answerPreCheckoutQuery', {
+      pre_checkout_query_id: ctx.update.pre_checkout_query.id,
+      ok: true
+    });
+  });
+
+  bot.on('message', async (ctx, next) => {
+    const payment = ctx.message?.successful_payment;
+    if (!payment) {
+      return next();
+    }
+
+    await syncUserProfile(ctx);
+
+    const match = /^ai_video_tokens:(\d+):/.exec(payment.invoice_payload || '');
+    if (!match) {
+      await ctx.reply('Payment received, but the token package was not recognized.');
+      return;
+    }
+
+    const tokenAmount = Number(match[1]);
+    const balance = await grantAiVideoTokens(ctx.from.id, tokenAmount);
     await ctx.reply(
-      'Откройте мини-приложение оплаты. Пока это заглушка с тарифами и кнопками без реального провайдера.',
-      buildPaymentKeyboard(ctx.from.id)
+      `Payment received. Added ${tokenAmount} ${formatTokenWord(tokenAmount)}. Your balance is now ${balance} ${formatTokenWord(balance)}.`
     );
   });
 
@@ -622,7 +955,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       return;
     }
 
-    const lines = user.stickerSets.map((set, index) => `${index + 1}. ${set.title} - https://t.me/addstickers/${set.name}`);
+    const lines = user.stickerSets.map((set, index) => `${index + 1}. ${getStickerSetDisplayTitle(set)} - https://t.me/addstickers/${set.name}`);
     await ctx.reply(lines.join('\n'));
   });
 
@@ -654,7 +987,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       }
 
       const keyboard = user.stickerSets.map((set, index) => [
-        Markup.button.callback(`📦 ${set.title}`, `pickset:${ctx.from.id}:${index}`)
+        Markup.button.callback(`📦 ${getStickerSetDisplayTitle(set)}`, `pickset:${ctx.from.id}:${index}`)
       ]);
       await ctx.reply('Выберите набор для добавления последнего стикера:', Markup.inlineKeyboard(keyboard));
       return;
@@ -668,6 +1001,20 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     const data = ctx.callbackQuery.data || '';
     const [action, ownerIdRaw, third, fourth] = data.split(':');
     const ownerId = Number(ownerIdRaw);
+
+    if (action === 'setlang') {
+      if (ctx.from.id !== ownerId) {
+        await ctx.answerCbQuery('This button is not for you.');
+        return;
+      }
+
+      const selectedLanguage = third === 'ru' ? 'ru' : 'en';
+      await setSelectedLanguage(ctx.from.id, selectedLanguage);
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
+      await ctx.answerCbQuery(selectedLanguage === 'ru' ? 'Язык сохранён.' : 'Language saved.');
+      await ctx.reply(helpText(config.baseUrl));
+      return;
+    }
 
     if (action === 'jobstatus') {
       if (ctx.from.id !== ownerId) {
@@ -684,6 +1031,18 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       return;
     }
 
+    if (action === 'buytokens') {
+      const tokenAmount = Number(third);
+
+      if (!STAR_TOKEN_PACKAGES.includes(tokenAmount)) {
+        await ctx.answerCbQuery('Unknown package.');
+        return;
+      }
+
+      await ctx.answerCbQuery();
+      await sendStarsInvoice(ctx, tokenAmount);
+      return;
+    }
     if (action === 'packcorners') {
       const mode = third;
       const roundedCorners = fourth === 'rounded';
@@ -720,7 +1079,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
           await ctx.reply('Нет доступных наборов. Сначала создайте новый через /newpack.');
         } else {
           const keyboard = user.stickerSets.map((set, index) => [
-            Markup.button.callback(`📦 ${set.title}`, `pickset:${ctx.from.id}:${index}`)
+            Markup.button.callback(`📦 ${getStickerSetDisplayTitle(set)}`, `pickset:${ctx.from.id}:${index}`)
           ]);
           await ctx.reply('Выберите набор для добавления последнего стикера:', Markup.inlineKeyboard(keyboard));
         }
@@ -735,7 +1094,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         ...current,
         pendingAction: { type: 'newpack' }
       }));
-      await ctx.editMessageReplyMarkup(undefined);
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       await promptForNewPackTitle(ctx);
       await ctx.answerCbQuery();
       return;
@@ -744,7 +1103,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     if (action === 'aivideo') {
       const user = await userState.getUser(ctx.from.id);
       const pending = user.pendingAction;
-      const balance = Number(user.balances?.aiVideoTokens || 0);
+      const balance = getAvailableAiVideoTokens(user);
 
       if (pending?.type !== 'choose_layout' || !pending.payload) {
         await ctx.answerCbQuery('Parameters not found.');
@@ -756,52 +1115,89 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         return;
       }
 
+      if (user.aiVideoChargePending?.jobId) {
+        await ctx.answerCbQuery('AI video is already running.');
+        return;
+      }
+
       if (balance < config.aiVideoTokenCost) {
         await ctx.answerCbQuery('Not enough tokens.');
         await ctx.reply(
-          `AI video sticker needs ${config.aiVideoTokenCost} ${formatTokenWord(config.aiVideoTokenCost)}. You now have ${balance} ${formatTokenWord(balance)}.`,
-          buildPaymentKeyboard(ctx.from.id)
+          buildBuyTokensText(balance),
+          buildStarsPaymentKeyboard(ctx.from.id)
         );
         return;
       }
 
-      await ctx.answerCbQuery('AI video sticker will be added soon.');
-      await ctx.reply(
-        `AI video sticker is already present in the flow. You have ${balance} ${formatTokenWord(balance)}. Tokens will be charged only when the real generation backend is connected.`,
-        buildPaymentKeyboard(ctx.from.id)
-      );
+      const draft = await prepareAiVideoReferenceDraft(ctx.from.id, pending.payload.inputPath, {
+        sourceOriginalName: pending.payload.originalName
+      });
+      await ctx.answerCbQuery('Открываю настройки AI video.');
+      await promptForAiVideoMode(ctx, draft);
       return;
     }
 
     if (action === 'aivideofromlast') {
       const user = await userState.getUser(ctx.from.id);
-      const balance = Number(user.balances?.aiVideoTokens || 0);
+      const balance = getAvailableAiVideoTokens(user);
 
       if (!user.lastConverted?.path) {
         await ctx.answerCbQuery('No sticker available.');
         return;
       }
 
+      if (user.aiVideoChargePending?.jobId) {
+        await ctx.answerCbQuery('AI video is already running.');
+        return;
+      }
+
       if (balance < config.aiVideoTokenCost) {
         await ctx.answerCbQuery('Not enough tokens.');
         await ctx.reply(
-          `AI video sticker needs ${config.aiVideoTokenCost} ${formatTokenWord(config.aiVideoTokenCost)}. You now have ${balance} ${formatTokenWord(balance)}.`,
-          buildPaymentKeyboard(ctx.from.id)
+          buildBuyTokensText(balance),
+          buildStarsPaymentKeyboard(ctx.from.id)
         );
         return;
       }
 
-      const prepared = await prepareAiVideoReferenceFromLast(ctx.from.id);
+      const draft = await prepareAiVideoReferenceFromLast(ctx.from.id);
+      await ctx.answerCbQuery('Открываю настройки AI video.');
+      await promptForAiVideoMode(ctx, draft);
+      return;
+    }
 
-      try {
-        await bot.telegram.sendPhoto(ctx.chat.id, {
-          source: prepared.outputPath,
-          filename: path.basename(prepared.outputPath)
-        });
-      } catch {}
+    if (action === 'aivideomode') {
+      const user = await userState.getUser(ctx.from.id);
+      const pending = user.pendingAction;
 
-      await ctx.answerCbQuery('Reference frame ready.');
-      await ctx.reply('PNG reference frame is ready. For WebM the bot first extracts frame 1. If the image is too small, it is upscaled so at least one side reaches 300 px. AI video generation will be connected next.');
+      if (pending?.type !== 'ai_video_choose_prompt_mode' || !pending.payload?.referenceImagePath) {
+        await ctx.answerCbQuery('Реф для AI video не найден.');
+        return;
+      }
+
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
+
+      if (third === 'custom') {
+        await userState.updateUser(ctx.from.id, (current) => ({
+          ...current,
+          pendingAction: {
+            type: 'ai_video_wait_custom_prompt',
+            payload: pending.payload
+          }
+        }));
+        await ctx.answerCbQuery('Жду ваш prompt.');
+        await ctx.reply('Пришлите prompt для AI video. Я расширю его, переведу на английский под Seedance и запущу генерацию.');
+        return;
+      }
+
+      await userState.updateUser(ctx.from.id, (current) => ({
+        ...current,
+        pendingAction: null
+      }));
+      await ctx.answerCbQuery('Придумываю движение.');
+      await enqueueAiVideoJob(ctx, pending.payload, {
+        promptMode: 'random'
+      });
       return;
     }
 
@@ -896,9 +1292,9 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       }
 
       const keyboard = user.stickerSets.map((set, index) => [
-        Markup.button.callback(`📦 ${set.title}`, `pickset:${ctx.from.id}:${index}`)
+        Markup.button.callback(`📦 ${getStickerSetDisplayTitle(set)}`, `pickset:${ctx.from.id}:${index}`)
       ]);
-      await ctx.editMessageReplyMarkup(undefined);
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       await ctx.reply('Выберите набор:', Markup.inlineKeyboard(keyboard));
       await ctx.answerCbQuery();
       return;
@@ -922,6 +1318,26 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     await syncUserProfile(ctx);
     if (!ctx.message.text.startsWith('/')) {
       const user = await userState.getUser(ctx.from.id);
+
+      if (user.pendingAction?.type === 'ai_video_wait_custom_prompt') {
+        const prompt = ctx.message.text.trim();
+        if (!prompt) {
+          await ctx.reply('Нужен непустой prompt.');
+          return;
+        }
+
+        const payload = user.pendingAction.payload;
+        await userState.updateUser(ctx.from.id, (current) => ({
+          ...current,
+          pendingAction: null
+        }));
+
+        await enqueueAiVideoJob(ctx, payload, {
+          promptMode: 'custom',
+          prompt
+        });
+        return;
+      }
 
       if (user.pendingAction?.type === 'generate_sticker_wait_prompt_only') {
         const prompt = ctx.message.text.trim();
@@ -1151,6 +1567,10 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
 
     await clearStatusMessage(internalJob.id);
 
+    if (internalJob.jobType === 'generate_video') {
+      await confirmAiVideoCharge(internalJob.owner.userId, internalJob.id);
+    }
+
     if (internalJob.jobType === 'generate_image') {
       await userState.updateUser(internalJob.owner.userId, (current) => ({
         ...current,
@@ -1183,6 +1603,43 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         buildLayoutKeyboard({
           userId: internalJob.owner.userId,
           inputType: 'image',
+          aiVideoTokens: (await userState.getUser(internalJob.owner.userId)).balances?.aiVideoTokens || 0
+        })
+      );
+      return;
+    }
+
+    if (internalJob.jobType === 'generate_video') {
+      await userState.updateUser(internalJob.owner.userId, (current) => ({
+        ...current,
+        pendingAction: {
+          type: 'choose_layout',
+          payload: {
+            inputPath: internalJob.outputPath,
+            originalName: internalJob.originalName || 'generated-video.mp4',
+            inputType: 'video'
+          }
+        }
+      }));
+
+      try {
+        await bot.telegram.sendVideo(
+          internalJob.owner.chatId,
+          {
+            source: internalJob.outputPath,
+            filename: path.basename(internalJob.outputPath)
+          }
+        );
+      } catch {
+        // ignore preview send errors and continue with the normal flow
+      }
+
+      await bot.telegram.sendMessage(
+        internalJob.owner.chatId,
+        buildLayoutPrompt('video'),
+        buildLayoutKeyboard({
+          userId: internalJob.owner.userId,
+          inputType: 'video',
           aiVideoTokens: (await userState.getUser(internalJob.owner.userId)).balances?.aiVideoTokens || 0
         })
       );
@@ -1232,9 +1689,21 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
 
     await clearStatusMessage(internalJob.id);
 
+    if (internalJob.jobType === 'generate_video') {
+      try {
+        await clearAiVideoChargePending(internalJob.owner.userId, internalJob.id);
+      } catch (error) {
+        console.error('Failed to clear pending AI video charge', error);
+      }
+    }
+
+    const failurePrefix = internalJob.jobType === 'generate_video'
+      ? 'AI video не удалось создать'
+      : 'Конвертация не удалась';
+
     await bot.telegram.sendMessage(
       internalJob.owner.chatId,
-      `Конвертация не удалась: ${job.error}`
+      `${failurePrefix}: ${job.error}`
     );
   });
 
@@ -1298,6 +1767,13 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     }
 
     try {
+      let adminThumbnail = null;
+      try {
+        adminThumbnail = await createAdminThumbnailFromSticker(user.lastConverted.path);
+      } catch {
+        adminThumbnail = null;
+      }
+
       const created = await stickerSets.createNewSet({
         userId: ctx.from.id,
         title: buildPackTitle(payload.title, me.username),
@@ -1326,7 +1802,8 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
                 fileId: created.fileId,
                 sourceOriginalName: current.lastConverted?.sourceOriginalName || current.lastConverted?.path || null,
                 sourceJobId: current.lastConverted?.jobId || null,
-                addedAt: new Date().toISOString()
+                addedAt: new Date().toISOString(),
+                thumbnailUrl: adminThumbnail?.publicUrl || null
               }
             ]
           }
@@ -1352,6 +1829,13 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     }
 
     try {
+      let adminThumbnail = null;
+      try {
+        adminThumbnail = await createAdminThumbnailFromSticker(user.lastConverted.path);
+      } catch {
+        adminThumbnail = null;
+      }
+
       const added = await stickerSets.addToSet({
         userId: ctx.from.id,
         setName,
@@ -1376,7 +1860,8 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
                 fileId: added.fileId,
                 sourceOriginalName: current.lastConverted?.sourceOriginalName || current.lastConverted?.path || null,
                 sourceJobId: current.lastConverted?.jobId || null,
-                addedAt: new Date().toISOString()
+                addedAt: new Date().toISOString(),
+                thumbnailUrl: adminThumbnail?.publicUrl || null
               }
             ]
           };
@@ -1391,7 +1876,18 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
 
   return {
     bot,
-    launch: async () => bot.launch(),
+    launch: async () => {
+      bot.launch().catch((error) => {
+        console.error('Telegram bot launch error', error);
+      });
+    },
     stop: async (reason) => bot.stop(reason)
   };
 }
+
+
+
+
+
+
+

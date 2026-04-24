@@ -64,7 +64,8 @@ export function createAdminRouter({ publicDir, userState, stickerSets }) {
                   isVideo: Boolean(sticker.is_video),
                   sourceOriginalName: localSticker?.sourceOriginalName || null,
                   sourceJobId: localSticker?.sourceJobId || null,
-                  addedAt: localSticker?.addedAt || null
+                  addedAt: localSticker?.addedAt || null,
+                  thumbnailUrl: localSticker?.thumbnailUrl || null
                 };
               })
             });

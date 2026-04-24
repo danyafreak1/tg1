@@ -20,7 +20,8 @@ export class JsonStore {
     }
 
     const raw = await fs.readFile(this.filePath, 'utf8');
-    this.cache = raw.trim() ? JSON.parse(raw) : structuredClone(this.defaultValue);
+    const sanitized = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+    this.cache = sanitized.trim() ? JSON.parse(sanitized) : structuredClone(this.defaultValue);
     return this.cache;
   }
 

@@ -66,6 +66,20 @@ function buildAiVideoReferenceFilter() {
   ].join(',');
 }
 
+function buildAdminThumbnailFilter(maxSide = 50) {
+  return [
+    `scale='if(gte(iw\\,ih)\\,${maxSide}\\,-1)':'if(gte(ih\\,iw)\\,${maxSide}\\,-1)'`,
+    'format=rgba'
+  ].join(',');
+}
+
+function buildBlurredImageFilter(blur = '6:2') {
+  return [
+    `boxblur=${blur}`,
+    'format=rgba'
+  ].join(',');
+}
+
 function buildVideoFilter({ fps, roundedCorners, forceSquare = false }) {
   const filters = [buildScaleFilter(forceSquare).replace('{FPS}', String(fps))];
   if (roundedCorners) {
@@ -103,6 +117,36 @@ function buildArgs({ inputPath, outputPath, fps, crf, roundedCorners, forceSquar
 }
 
 export class TelegramStickerConverter {
+  async prepareBlurredImageReference({ inputPath, outputPath, blur = '6:2' }) {
+    await runBinary(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        inputPath,
+        '-frames:v',
+        '1',
+        '-an',
+        '-vf',
+        buildBlurredImageFilter(blur),
+        outputPath
+      ],
+      config.ffmpegTimeoutMs
+    );
+
+    const stats = await fs.stat(outputPath);
+    return {
+      size: stats.size,
+      outputPath,
+      metadata: {
+        type: 'image'
+      },
+      attempt: {
+        label: `blurred-reference-${blur}`
+      }
+    };
+  }
+
   async prepareAiVideoReference({ inputPath, outputPath }) {
     await runBinary(
       'ffmpeg',
@@ -159,6 +203,36 @@ export class TelegramStickerConverter {
       },
       attempt: {
         label: 'preview-png-normalized'
+      }
+    };
+  }
+
+  async prepareAdminThumbnail({ inputPath, outputPath, maxSide = 50 }) {
+    await runBinary(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        inputPath,
+        '-frames:v',
+        '1',
+        '-an',
+        '-vf',
+        buildAdminThumbnailFilter(maxSide),
+        outputPath
+      ],
+      config.ffmpegTimeoutMs
+    );
+
+    const stats = await fs.stat(outputPath);
+    return {
+      size: stats.size,
+      outputPath,
+      metadata: {
+        type: 'image'
+      },
+      attempt: {
+        label: 'admin-thumbnail-png'
       }
     };
   }

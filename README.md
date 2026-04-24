@@ -225,12 +225,11 @@ Supported commands:
 - `/newpack`
 - `/add`
 
-Mini app stub:
+Telegram Stars payments:
 
-- `/pay` opens a Telegram Mini App button
-- the mini app is served from `GET /payment.html`
-- this is currently a local stub with pricing cards and fake payment buttons
-- later you can connect it to Telegram Payments or another provider
+- `/pay` opens an in-chat purchase menu
+- digital goods are sold in Telegram Stars (`XTR`)
+- the bot sends an invoice, confirms `pre_checkout_query`, and credits tokens after `successful_payment`
 
 Image generation bot flow:
 

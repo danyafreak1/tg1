@@ -13,6 +13,9 @@ import { ImageGenerationService } from './server/imageGenerationService.js';
 import { ChatPromptService } from './server/chatPromptService.js';
 import { ChatCompletionService } from './server/chatCompletionService.js';
 import { PromptEnhancementService } from './server/promptEnhancementService.js';
+import { createVideoProvider } from './integrations/videoProviders/index.js';
+import { AiVideoPromptService } from './server/aiVideoPromptService.js';
+import { VideoGenerationService } from './server/videoGenerationService.js';
 
 const storage = new StorageService();
 await storage.init();
@@ -22,6 +25,7 @@ const chatCompletionService = new ChatCompletionService({
   chatPromptService
 });
 const promptEnhancementService = new PromptEnhancementService();
+const aiVideoPromptService = new AiVideoPromptService();
 
 const converter = new TelegramStickerConverter();
 const imageGenerationService = new ImageGenerationService({
@@ -29,11 +33,18 @@ const imageGenerationService = new ImageGenerationService({
   provider: createImageProvider(),
   promptEnhancer: promptEnhancementService
 });
+const videoGenerationService = new VideoGenerationService({
+  storage,
+  converter,
+  provider: createVideoProvider(),
+  promptService: aiVideoPromptService
+});
 const backend = new BackendService({
   storage,
   converter,
   queue: null,
-  imageGenerationService
+  imageGenerationService,
+  videoGenerationService
 });
 
 const queue = new JobQueue({

@@ -34,6 +34,7 @@ function normalizeQuery(value) {
 function renderSticker(sticker) {
   return `
     <div class="sticker-row">
+      ${sticker.thumbnailUrl ? `<img class="sticker-thumb" src="${sticker.thumbnailUrl}" alt="Sticker preview" loading="lazy" />` : ''}
       <div>
         <p><strong>${sticker.emoji}</strong> ${sticker.width}x${sticker.height} ${sticker.isVideo ? 'video' : ''}</p>
         ${sticker.sourceOriginalName ? `<p class="muted"><span class="search-hit">${sticker.sourceOriginalName}</span></p>` : ''}

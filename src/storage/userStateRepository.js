@@ -11,6 +11,7 @@ function createDefaultUserState() {
     stickerSets: [],
     lastConverted: null,
     pendingAction: null,
+    aiVideoChargePending: null,
     chatHistory: [],
     profile: null,
     balances: {
