@@ -27,8 +27,9 @@ export class AcedataSeedanceVideoProvider {
     this.duration = duration;
   }
 
-  buildRequestBody({ prompt, imageUrl = null, referenceImageUrl = null }) {
+  buildRequestBody({ prompt, imageUrl = null, referenceImageUrl = null, ratio = null }) {
     const resolvedImageUrl = referenceImageUrl || imageUrl;
+    const resolvedRatio = ratio || this.ratio;
     const content = [];
 
     if (resolvedImageUrl) {
@@ -51,7 +52,7 @@ export class AcedataSeedanceVideoProvider {
       content,
       generate_audio: this.generateAudio,
       model: this.model,
-      ratio: this.ratio,
+      ratio: resolvedRatio,
       watermark: this.watermark,
       resolution: this.resolution,
       camerafixed: this.cameraFixed,
@@ -60,7 +61,7 @@ export class AcedataSeedanceVideoProvider {
     };
   }
 
-  async generate({ prompt, imageUrl = null, referenceImageUrl = null, outputPath }) {
+  async generate({ prompt, imageUrl = null, referenceImageUrl = null, outputPath, ratio = null }) {
     if (!outputPath) {
       throw new AppError('Output path is required for Seedance generation.', 500);
     }
@@ -68,7 +69,8 @@ export class AcedataSeedanceVideoProvider {
     const requestBody = this.buildRequestBody({
       prompt,
       imageUrl,
-      referenceImageUrl
+      referenceImageUrl,
+      ratio
     });
 
     const response = await fetch(this.baseUrl, {
@@ -126,6 +128,7 @@ export class AcedataSeedanceVideoProvider {
       taskId: payload?.task_id || null,
       provider: 'acedata-seedance',
       model: entry?.model || this.model,
+      ratio: requestBody.ratio,
       moderationStatus: entry?.status || null
     };
   }

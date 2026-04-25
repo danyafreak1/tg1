@@ -6,6 +6,14 @@ import { AppError } from '../utils/errors.js';
 const SOFT_BLUR = '6:3';
 const MEDIUM_BLUR = '8:3';
 const HARD_BLUR = '10:3';
+const SEEDANCE_RATIOS = [
+  { value: '21:9', ratio: 21 / 9 },
+  { value: '16:9', ratio: 16 / 9 },
+  { value: '4:3', ratio: 4 / 3 },
+  { value: '1:1', ratio: 1 },
+  { value: '3:4', ratio: 3 / 4 },
+  { value: '9:16', ratio: 9 / 16 }
+];
 
 function sanitizePrompt(value) {
   return String(value || '').trim();
@@ -13,6 +21,32 @@ function sanitizePrompt(value) {
 
 function isSensitiveModerationError(error) {
   return /sensitive information/i.test(String(error?.message || ''));
+}
+
+function pickCropSafeSeedanceRatio(width, height) {
+  const sourceRatio = width / height;
+  const isSquare = Math.abs(sourceRatio - 1) < 0.02;
+  if (isSquare) {
+    return '1:1';
+  }
+
+  const cropSafeCandidates = SEEDANCE_RATIOS.filter((candidate) => (
+    sourceRatio > 1
+      ? candidate.ratio <= sourceRatio && candidate.ratio >= 1
+      : candidate.ratio >= sourceRatio && candidate.ratio <= 1
+  ));
+  const candidates = cropSafeCandidates.length ? cropSafeCandidates : SEEDANCE_RATIOS;
+  const selected = candidates.reduce((best, candidate) => {
+    const distance = Math.abs(Math.log(sourceRatio / candidate.ratio));
+    return distance < best.distance ? { ...candidate, distance } : best;
+  }, { ...candidates[0], distance: Infinity });
+
+  return selected.value;
+}
+
+function parseRatioValue(ratio) {
+  const [width, height] = String(ratio || '').split(':').map(Number);
+  return width > 0 && height > 0 ? width / height : 1;
 }
 
 export class VideoGenerationService {
@@ -32,18 +66,32 @@ export class VideoGenerationService {
     const debugPaths = {
       originalInputPng: null,
       flattenedReferencePng: null,
+      croppedReferencePng: null,
       seedanceOutputMp4: null
     };
 
+    const inputStream = await this.converter.probeVisualStream(referenceImagePath);
+    const seedanceRatio = inputStream.width > 0 && inputStream.height > 0
+      ? pickCropSafeSeedanceRatio(inputStream.width, inputStream.height)
+      : config.acedataVideoRatio;
+    const seedanceRatioValue = parseRatioValue(seedanceRatio);
     const inputHasAlpha = await this.converter.hasAlphaChannel(referenceImagePath);
     const originalDebugPath = this.createDebugPath(jobId, 'original-input', '.png');
     await fs.copyFile(referenceImagePath, originalDebugPath);
     debugPaths.originalInputPng = originalDebugPath;
 
     if (!inputHasAlpha) {
+      const croppedDebugPath = this.createDebugPath(jobId, `cropped-${seedanceRatio.replace(':', 'x')}`, '.png');
+      await this.converter.cropImageToAspectRatio({
+        inputPath: referenceImagePath,
+        outputPath: croppedDebugPath,
+        targetRatio: seedanceRatioValue
+      });
+      debugPaths.croppedReferencePng = croppedDebugPath;
+
       const originalFileName = `seedance-ref-${jobId}.png`;
       const originalPublicPath = path.join(config.publicDir, originalFileName);
-      await fs.copyFile(referenceImagePath, originalPublicPath);
+      await fs.copyFile(croppedDebugPath, originalPublicPath);
       cleanupPaths.push(originalPublicPath);
 
       return {
@@ -51,9 +99,10 @@ export class VideoGenerationService {
           filePath: originalPublicPath,
           publicUrl: `${config.baseUrl}/${originalFileName}`
         },
+        seedanceRatio,
         cleanupPaths,
         debugPaths,
-        blurSourcePath: referenceImagePath
+        blurSourcePath: croppedDebugPath
       };
     }
 
@@ -66,9 +115,17 @@ export class VideoGenerationService {
 
     debugPaths.flattenedReferencePng = flattenedDebugPath;
 
+    const croppedDebugPath = this.createDebugPath(jobId, `cropped-${seedanceRatio.replace(':', 'x')}`, '.png');
+    await this.converter.cropImageToAspectRatio({
+      inputPath: flattenedDebugPath,
+      outputPath: croppedDebugPath,
+      targetRatio: seedanceRatioValue
+    });
+    debugPaths.croppedReferencePng = croppedDebugPath;
+
     const originalFileName = `seedance-ref-${jobId}.png`;
     const originalPublicPath = path.join(config.publicDir, originalFileName);
-    await fs.copyFile(flattenedDebugPath, originalPublicPath);
+    await fs.copyFile(croppedDebugPath, originalPublicPath);
     cleanupPaths.push(originalPublicPath);
 
       return {
@@ -76,9 +133,10 @@ export class VideoGenerationService {
           filePath: originalPublicPath,
           publicUrl: `${config.baseUrl}/${originalFileName}`
         },
+        seedanceRatio,
         cleanupPaths,
         debugPaths,
-        blurSourcePath: flattenedDebugPath
+        blurSourcePath: croppedDebugPath
       };
   }
 
@@ -101,7 +159,7 @@ export class VideoGenerationService {
 
   async buildEffectivePrompt({ promptMode, prompt, referenceImageUrl }) {
     if (!this.promptService) {
-      return sanitizePrompt(prompt) || 'Using the reference image, preserve the same scene and add one subtle, believable motion for a short 3-second square sticker video.';
+      return sanitizePrompt(prompt) || 'Using the reference image, preserve the same scene and add one subtle, believable motion for a short 3-second sticker video.';
     }
 
     if (promptMode === 'random') {
@@ -109,6 +167,19 @@ export class VideoGenerationService {
     }
 
     return this.promptService.enhanceCustomPrompt(prompt);
+  }
+
+  async resolveSeedanceRatio(referenceImagePath) {
+    try {
+      const stream = await this.converter.probeVisualStream(referenceImagePath);
+      if (stream.width > 0 && stream.height > 0) {
+        return pickCropSafeSeedanceRatio(stream.width, stream.height);
+      }
+    } catch {
+      // Fall back to the configured ratio if probing fails.
+    }
+
+    return config.acedataVideoRatio;
   }
 
   async generateVideo({ jobId, referenceImagePath, promptMode = 'custom', prompt = '' }) {
@@ -122,6 +193,7 @@ export class VideoGenerationService {
 
     const {
       original,
+      seedanceRatio,
       cleanupPaths,
       debugPaths,
       blurSourcePath
@@ -148,7 +220,8 @@ export class VideoGenerationService {
         const generated = await this.provider.generate({
           prompt: effectivePrompt,
           referenceImageUrl: attempt.referenceImageUrl,
-          outputPath: generatedVideoPath
+          outputPath: generatedVideoPath,
+          ratio: seedanceRatio
         });
 
         debugPaths.seedanceOutputMp4 = generated.outputPath;
@@ -157,6 +230,7 @@ export class VideoGenerationService {
           outputPath: generated.outputPath,
           provider: generated.provider,
           model: generated.model,
+          seedanceRatio: generated.ratio || seedanceRatio,
           effectivePrompt,
           cleanupPaths: [...cleanupPaths],
           referenceImageUrl: attempt.referenceImageUrl,

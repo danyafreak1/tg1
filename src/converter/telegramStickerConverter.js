@@ -47,9 +47,6 @@ function buildImageFilter({ roundedCorners, forceSquare = false }) {
         `scale=${side}:${side}:force_original_aspect_ratio=decrease`
       ];
 
-  if (forceSquare) {
-    // Square mode uses centered crop instead of transparent padding.
-  }
   filters.push(
     'format=rgba'
   );
@@ -62,6 +59,13 @@ function buildImageFilter({ roundedCorners, forceSquare = false }) {
 function buildAiVideoReferenceFilter() {
   return [
     "scale='ceil(iw*max(1\\,max(300/iw\\,300/ih)))':'ceil(ih*max(1\\,max(300/iw\\,300/ih)))'",
+    'format=rgba'
+  ].join(',');
+}
+
+function buildCropToAspectRatioFilter(targetRatio) {
+  return [
+    `crop=w='if(gt(iw/ih\\,${targetRatio})\\,floor(ih*${targetRatio}/2)*2\\,iw)':h='if(gt(iw/ih\\,${targetRatio})\\,ih\\,floor(iw/${targetRatio}/2)*2)':x='(iw-ow)/2':y='(ih-oh)/2'`,
     'format=rgba'
   ].join(',');
 }
@@ -233,6 +237,36 @@ export class TelegramStickerConverter {
       },
       attempt: {
         label: 'ai-video-reference-png'
+      }
+    };
+  }
+
+  async cropImageToAspectRatio({ inputPath, outputPath, targetRatio }) {
+    await runBinary(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        inputPath,
+        '-frames:v',
+        '1',
+        '-an',
+        '-vf',
+        buildCropToAspectRatioFilter(targetRatio),
+        outputPath
+      ],
+      config.ffmpegTimeoutMs
+    );
+
+    const stats = await fs.stat(outputPath);
+    return {
+      size: stats.size,
+      outputPath,
+      metadata: {
+        type: 'image'
+      },
+      attempt: {
+        label: `crop-to-ratio-${targetRatio}`
       }
     };
   }

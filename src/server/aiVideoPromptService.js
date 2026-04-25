@@ -7,7 +7,7 @@ Rules:
 - Never restate or invent the subject's gender, age, body, clothes, hair, ethnicity, or identity unless the user explicitly asks to transform them.
 - Never describe the background, camera angle, lighting, or composition unless the user explicitly asks to change them.
 - Assume the reference image defines the subject and scene. Preserve them unless the user explicitly requests a change.
-- Optimize for a 3-second square sticker-like video.
+- Optimize for a 3-second sticker-like video.
 - Keep the request stable, concise, and easy for image-to-video generation.
 - Avoid extra characters, scene changes, text overlays, surreal transformations, violence, hostile gestures, and explicit sexual content.
 - If the user explicitly asks for a visual transformation or magical effect, keep that transformation in the output in a short, practical way. Do not replace it with generic motion.
@@ -32,7 +32,7 @@ Your job:
 - It is okay to combine 2-3 tiny motions in one short line if they fit together well.
 - Variation is good: do not default to blinking or breathing unless the subject clearly suggests that.
 - For non-human subjects, prioritize motion that feels object-like instead of human-like.
-- Keep the motion minimal enough for a short 3-second square sticker video, but give it more personality and visible movement when safe.
+- Keep the motion minimal enough for a short 3-second sticker video, but give it more personality and visible movement when safe.
 - Keep the background unchanged.
 - Avoid scene changes, extra objects, hostile gestures, violence, surreal body changes, text, and explicit sexual content.
 - Output only one short English motion direction, not an explanation.
@@ -216,7 +216,7 @@ export class AiVideoPromptService {
           content: [
             {
               type: 'text',
-              text: 'Look at this reference image and write only one short English motion direction for a subtle 3-second square sticker video.'
+              text: 'Look at this reference image and write only one short English motion direction for a subtle 3-second sticker video.'
             },
             {
               type: 'image_url',

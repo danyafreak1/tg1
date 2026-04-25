@@ -1326,7 +1326,11 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       const keyboard = user.stickerSets.map((set, index) => [
         Markup.button.callback(`📦 ${getStickerSetDisplayTitle(set)}`, `pickset:${ctx.from.id}:${index}`)
       ]);
-      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
+      try {
+        await ctx.editMessageReplyMarkup(undefined);
+      } catch {
+        // Keep the sticker message even if Telegram refuses to edit old markup.
+      }
       await ctx.reply('Выберите набор:', Markup.inlineKeyboard(keyboard));
       await ctx.answerCbQuery();
       return;
@@ -1812,8 +1816,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         shortName: payload.shortName,
         emoji: payload.emoji || DEFAULT_EMOJI,
         stickerPath: user.lastConverted.path,
-        stickerFormat: user.lastConverted.stickerFormat || 'video',
-        stickerFileId: user.lastConverted.documentFileId || null
+        stickerFormat: user.lastConverted.stickerFormat || 'video'
       });
 
       await userState.updateUser(ctx.from.id, (current) => ({
@@ -1873,8 +1876,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         setName,
         emoji: emoji || DEFAULT_EMOJI,
         stickerPath: user.lastConverted.path,
-        stickerFormat: user.lastConverted.stickerFormat || 'video',
-        stickerFileId: user.lastConverted.documentFileId || null
+        stickerFormat: user.lastConverted.stickerFormat || 'video'
       });
 
       await userState.updateUser(ctx.from.id, (current) => ({
