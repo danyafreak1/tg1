@@ -294,6 +294,12 @@ function buildAiVideoPromptModeKeyboard(userId) {
   ]);
 }
 
+function buildAiVideoPromptInputKeyboard(userId) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🎲 Использовать случайный prompt', `aivideorandomfromprompt:${userId}`)]
+  ]);
+}
+
 function buildNewPackPreview({ title, shortName, botUsername, emoji }) {
   return [
     'Проверьте новый набор:',
@@ -1161,6 +1167,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       }
 
       const draft = await prepareAiVideoReferenceFromLast(ctx.from.id);
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       await ctx.answerCbQuery('Открываю настройки AI video.');
       await promptForAiVideoMode(ctx, draft);
       return;
@@ -1186,7 +1193,10 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
           }
         }));
         await ctx.answerCbQuery('Жду ваш prompt.');
-        await ctx.reply('Пришлите prompt для AI video. Я расширю его, переведу на английский под Seedance и запущу генерацию.');
+        await ctx.reply(
+          'Пришлите prompt для AI video. Я расширю его, переведу на английский под Seedance и запущу генерацию.',
+          buildAiVideoPromptInputKeyboard(ctx.from.id)
+        );
         return;
       }
 
@@ -1195,6 +1205,28 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         pendingAction: null
       }));
       await ctx.answerCbQuery('Придумываю движение.');
+      await enqueueAiVideoJob(ctx, pending.payload, {
+        promptMode: 'random'
+      });
+      return;
+    }
+
+    if (action === 'aivideorandomfromprompt') {
+      const user = await userState.getUser(ctx.from.id);
+      const pending = user.pendingAction;
+
+      if (pending?.type !== 'ai_video_wait_custom_prompt' || !pending.payload?.referenceImagePath) {
+        await ctx.answerCbQuery('Реф для AI video не найден.');
+        return;
+      }
+
+      await userState.updateUser(ctx.from.id, (current) => ({
+        ...current,
+        pendingAction: null
+      }));
+
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
+      await ctx.answerCbQuery('Переключаю на случайный prompt.');
       await enqueueAiVideoJob(ctx, pending.payload, {
         promptMode: 'random'
       });
@@ -1615,7 +1647,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         pendingAction: {
           type: 'choose_layout',
           payload: {
-            inputPath: internalJob.outputPath,
+            inputPath: internalJob.generatedSourcePath || internalJob.outputPath,
             originalName: internalJob.originalName || 'generated-video.mp4',
             inputType: 'video'
           }

@@ -61,16 +61,21 @@ export class OpenAiImageProvider {
       const data = await response.json();
       if (response.ok) {
         const imageUrl = data?.data?.[0]?.url;
-        if (!imageUrl) {
-          throw new AppError('Image provider did not return an image URL.', 502);
+        const imageBase64 = data?.data?.[0]?.b64_json;
+        if (!imageUrl && !imageBase64) {
+          throw new AppError('Image provider did not return an image.', 502);
         }
 
-        await this.downloadImageTo(outputPath, imageUrl);
+        if (imageUrl) {
+          await this.downloadImageTo(outputPath, imageUrl);
+        } else {
+          await fs.writeFile(outputPath, Buffer.from(imageBase64, 'base64'));
+        }
 
         return {
           outputPath,
           mimeType: 'image/png',
-          revisedPrompt: prompt,
+          revisedPrompt: data?.data?.[0]?.revised_prompt || prompt,
           provider: 'openai-compatible-images'
         };
       }
@@ -93,7 +98,11 @@ export class OpenAiImageProvider {
       throw new AppError('This image provider is currently configured only for text-to-image generation.', 400);
     }
 
-    if (this.baseUrl.includes('api.xinjianya.top') || this.model === 'grok-imagine-image-lite') {
+    if (
+      this.baseUrl.includes('api.xinjianya.top') ||
+      this.model === 'grok-imagine-image-lite' ||
+      /^gpt-image/i.test(this.model)
+    ) {
       return this.generateViaImagesEndpoint({ prompt, outputPath });
     }
 

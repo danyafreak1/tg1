@@ -3,7 +3,9 @@ import { promises as fs } from 'node:fs';
 import { config } from '../config/env.js';
 import { AppError } from '../utils/errors.js';
 
-const SOFT_BLUR = '6:2';
+const SOFT_BLUR = '6:3';
+const MEDIUM_BLUR = '8:3';
+const HARD_BLUR = '10:3';
 
 function sanitizePrompt(value) {
   return String(value || '').trim();
@@ -21,28 +23,73 @@ export class VideoGenerationService {
     this.promptService = promptService;
   }
 
-  async prepareReferenceVariants(jobId, referenceImagePath) {
-    const originalFileName = `seedance-ref-${jobId}.png`;
-    const originalPublicPath = path.join(config.publicDir, originalFileName);
-    await fs.copyFile(referenceImagePath, originalPublicPath);
-
-    return {
-      original: {
-        filePath: originalPublicPath,
-        publicUrl: `${config.baseUrl}/${originalFileName}`
-      },
-      cleanupPaths: [originalPublicPath]
-    };
+  createDebugPath(jobId, suffix, extension) {
+    return path.join(config.outputsDir, `${jobId}_${suffix}${extension}`);
   }
 
-  async ensureSoftBlurVariant(jobId, referenceImagePath, cleanupPaths) {
-    const fileName = `seedance-ref-${jobId}-soft.png`;
+  async prepareReferenceVariants(jobId, referenceImagePath) {
+    const cleanupPaths = [];
+    const debugPaths = {
+      originalInputPng: null,
+      flattenedReferencePng: null,
+      seedanceOutputMp4: null
+    };
+
+    const inputHasAlpha = await this.converter.hasAlphaChannel(referenceImagePath);
+    const originalDebugPath = this.createDebugPath(jobId, 'original-input', '.png');
+    await fs.copyFile(referenceImagePath, originalDebugPath);
+    debugPaths.originalInputPng = originalDebugPath;
+
+    if (!inputHasAlpha) {
+      const originalFileName = `seedance-ref-${jobId}.png`;
+      const originalPublicPath = path.join(config.publicDir, originalFileName);
+      await fs.copyFile(referenceImagePath, originalPublicPath);
+      cleanupPaths.push(originalPublicPath);
+
+      return {
+        original: {
+          filePath: originalPublicPath,
+          publicUrl: `${config.baseUrl}/${originalFileName}`
+        },
+        cleanupPaths,
+        debugPaths,
+        blurSourcePath: referenceImagePath
+      };
+    }
+
+    const flattenedDebugPath = this.createDebugPath(jobId, 'flattened-white', '.png');
+    await this.converter.flattenImageOnSolidBackground({
+      inputPath: referenceImagePath,
+      outputPath: flattenedDebugPath,
+      backgroundHex: 'FFFFFF'
+    });
+
+    debugPaths.flattenedReferencePng = flattenedDebugPath;
+
+    const originalFileName = `seedance-ref-${jobId}.png`;
+    const originalPublicPath = path.join(config.publicDir, originalFileName);
+    await fs.copyFile(flattenedDebugPath, originalPublicPath);
+    cleanupPaths.push(originalPublicPath);
+
+      return {
+        original: {
+          filePath: originalPublicPath,
+          publicUrl: `${config.baseUrl}/${originalFileName}`
+        },
+        cleanupPaths,
+        debugPaths,
+        blurSourcePath: flattenedDebugPath
+      };
+  }
+
+  async ensureBlurVariant(jobId, referenceImagePath, cleanupPaths, { label, blur }) {
+    const fileName = `seedance-ref-${jobId}-${label}.png`;
     const outputPath = path.join(config.publicDir, fileName);
 
     await this.converter.prepareBlurredImageReference({
       inputPath: referenceImagePath,
       outputPath,
-      blur: SOFT_BLUR
+      blur
     });
 
     cleanupPaths.push(outputPath);
@@ -73,7 +120,12 @@ export class VideoGenerationService {
       throw new AppError('Reference image is required for AI video generation.', 400);
     }
 
-    const { original, cleanupPaths } = await this.prepareReferenceVariants(jobId, referenceImagePath);
+    const {
+      original,
+      cleanupPaths,
+      debugPaths,
+      blurSourcePath
+    } = await this.prepareReferenceVariants(jobId, referenceImagePath);
     const effectivePrompt = await this.buildEffectivePrompt({
       promptMode,
       prompt,
@@ -99,23 +151,54 @@ export class VideoGenerationService {
           outputPath: generatedVideoPath
         });
 
+        debugPaths.seedanceOutputMp4 = generated.outputPath;
+
         return {
           outputPath: generated.outputPath,
           provider: generated.provider,
           model: generated.model,
           effectivePrompt,
           cleanupPaths: [...cleanupPaths],
-          referenceImageUrl: attempt.referenceImageUrl
+          referenceImageUrl: attempt.referenceImageUrl,
+          generatedSourcePath: generated.outputPath,
+          debugPaths
         };
       } catch (error) {
         lastError = error;
         await this.storage.removeFile(generatedVideoPath);
 
         if (attempt.label === 'original' && isSensitiveModerationError(error)) {
-          const soft = await this.ensureSoftBlurVariant(jobId, referenceImagePath, cleanupPaths);
+          const soft = await this.ensureBlurVariant(jobId, blurSourcePath, cleanupPaths, {
+            label: 'soft',
+            blur: SOFT_BLUR
+          });
           attempts.push({
             label: 'soft',
             referenceImageUrl: soft.publicUrl
+          });
+          continue;
+        }
+
+        if (attempt.label === 'soft' && isSensitiveModerationError(error)) {
+          const medium = await this.ensureBlurVariant(jobId, blurSourcePath, cleanupPaths, {
+            label: 'medium',
+            blur: MEDIUM_BLUR
+          });
+          attempts.push({
+            label: 'medium',
+            referenceImageUrl: medium.publicUrl
+          });
+          continue;
+        }
+
+        if (attempt.label === 'medium' && isSensitiveModerationError(error)) {
+          const hard = await this.ensureBlurVariant(jobId, blurSourcePath, cleanupPaths, {
+            label: 'hard',
+            blur: HARD_BLUR
+          });
+          attempts.push({
+            label: 'hard',
+            referenceImageUrl: hard.publicUrl
           });
           continue;
         }

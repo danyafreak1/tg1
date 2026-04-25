@@ -61,7 +61,7 @@ function buildImageFilter({ roundedCorners, forceSquare = false }) {
 
 function buildAiVideoReferenceFilter() {
   return [
-    "scale='if(gte(max(iw\\,ih)\\,300)\\,iw\\,if(gte(iw\\,ih)\\,300\\,-1))':'if(gte(max(iw\\,ih)\\,300)\\,ih\\,if(gte(ih\\,iw)\\,300\\,-1))'",
+    "scale='ceil(iw*max(1\\,max(300/iw\\,300/ih)))':'ceil(ih*max(1\\,max(300/iw\\,300/ih)))'",
     'format=rgba'
   ].join(',');
 }
@@ -78,6 +78,13 @@ function buildBlurredImageFilter(blur = '6:2') {
     `boxblur=${blur}`,
     'format=rgba'
   ].join(',');
+}
+
+function buildFlattenOnSolidBackgroundFilter(width, height, backgroundHex) {
+  return [
+    `color=c=0x${backgroundHex}:s=${width}x${height}[bg]`,
+    '[bg][0:v]overlay=format=auto,format=rgb24'
+  ].join(';');
 }
 
 function buildVideoFilter({ fps, roundedCorners, forceSquare = false }) {
@@ -117,6 +124,59 @@ function buildArgs({ inputPath, outputPath, fps, crf, roundedCorners, forceSquar
 }
 
 export class TelegramStickerConverter {
+  async probeVisualStream(filePath) {
+    const { stdout } = await runBinary(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-print_format',
+        'json',
+        '-show_entries',
+        'stream=codec_type,width,height,pix_fmt:stream_tags=alpha_mode',
+        filePath
+      ],
+      config.ffmpegTimeoutMs
+    );
+
+    const parsed = JSON.parse(stdout);
+    const stream = parsed.streams?.find((item) => item.codec_type === 'video') || parsed.streams?.[0];
+    if (!stream) {
+      throw new AppError('Unable to inspect visual stream.', 500);
+    }
+
+    return {
+      width: Number(stream.width) || 0,
+      height: Number(stream.height) || 0,
+      pixelFormat: stream.pix_fmt || '',
+      alphaMode: String(stream?.tags?.alpha_mode || stream?.tags?.ALPHA_MODE || '')
+    };
+  }
+
+  async hasAlphaChannel(filePath) {
+    const stream = await this.probeVisualStream(filePath);
+    return /a/.test(stream.pixelFormat);
+  }
+
+  async flattenImageOnSolidBackground({ inputPath, outputPath, backgroundHex }) {
+    const stream = await this.probeVisualStream(inputPath);
+    await runBinary(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        inputPath,
+        '-frames:v',
+        '1',
+        '-an',
+        '-filter_complex',
+        buildFlattenOnSolidBackgroundFilter(stream.width, stream.height, backgroundHex),
+        outputPath
+      ],
+      config.ffmpegTimeoutMs
+    );
+  }
+
   async prepareBlurredImageReference({ inputPath, outputPath, blur = '6:2' }) {
     await runBinary(
       'ffmpeg',

@@ -80,6 +80,9 @@ export class BackendService extends EventEmitter {
       if (result.cleanupPaths) {
         job.cleanupPaths = result.cleanupPaths;
       }
+      if (result.debugPaths) {
+        job.debugPaths = result.debugPaths;
+      }
       if (result.originalName && job.originalName === 'prompt-only') {
         job.originalName = result.originalName;
       }
@@ -211,8 +214,9 @@ export class BackendService extends EventEmitter {
       format: 'video',
       provider: generated.provider,
       revisedPrompt: generated.effectivePrompt || null,
-      generatedSourcePath: generated.outputPath,
-      cleanupPaths: generated.cleanupPaths || []
+      generatedSourcePath: generated.generatedSourcePath || generated.outputPath,
+      cleanupPaths: generated.cleanupPaths || [],
+      debugPaths: generated.debugPaths || null
     };
   }
 
