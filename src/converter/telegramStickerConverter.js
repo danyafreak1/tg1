@@ -91,6 +91,35 @@ function buildFlattenOnSolidBackgroundFilter(width, height, backgroundHex) {
   ].join(';');
 }
 
+function buildChromakeyToAlphaFilter({ colorHex = '00FF00', similarity = 0.35, blend = 0 }) {
+  return `chromakey=0x${colorHex}:${similarity}:${blend},format=yuva420p`;
+}
+
+async function buildAlphaAwareInputArgs(filePath) {
+  const { stdout } = await runBinary(
+    'ffprobe',
+    [
+      '-v',
+      'error',
+      '-print_format',
+      'json',
+      '-show_entries',
+      'stream=codec_type:stream_tags=alpha_mode',
+      filePath
+    ],
+    config.ffmpegTimeoutMs
+  );
+  const parsed = JSON.parse(stdout);
+  const videoStream = parsed.streams?.find((stream) => stream.codec_type === 'video') || parsed.streams?.[0];
+  const alphaMode = String(videoStream?.tags?.alpha_mode || videoStream?.tags?.ALPHA_MODE || '');
+
+  if (/\.webm$/i.test(filePath) && alphaMode === '1') {
+    return ['-c:v', 'libvpx-vp9', '-i', filePath];
+  }
+
+  return ['-i', filePath];
+}
+
 function buildVideoFilter({ fps, roundedCorners, forceSquare = false }) {
   const filters = [buildScaleFilter(forceSquare).replace('{FPS}', String(fps))];
   if (roundedCorners) {
@@ -99,11 +128,10 @@ function buildVideoFilter({ fps, roundedCorners, forceSquare = false }) {
   return filters.join(',');
 }
 
-function buildArgs({ inputPath, outputPath, fps, crf, roundedCorners, forceSquare = false }) {
+function buildArgs({ inputArgs, outputPath, fps, crf, roundedCorners, forceSquare = false }) {
   return [
     '-y',
-    '-i',
-    inputPath,
+    ...inputArgs,
     '-t',
     String(config.stickerDurationLimitSec),
     '-an',
@@ -159,17 +187,17 @@ export class TelegramStickerConverter {
 
   async hasAlphaChannel(filePath) {
     const stream = await this.probeVisualStream(filePath);
-    return /a/.test(stream.pixelFormat);
+    return /a/.test(stream.pixelFormat) || stream.alphaMode === '1';
   }
 
   async flattenImageOnSolidBackground({ inputPath, outputPath, backgroundHex }) {
     const stream = await this.probeVisualStream(inputPath);
+    const inputArgs = await buildAlphaAwareInputArgs(inputPath);
     await runBinary(
       'ffmpeg',
       [
         '-y',
-        '-i',
-        inputPath,
+        ...inputArgs,
         '-frames:v',
         '1',
         '-an',
@@ -179,6 +207,57 @@ export class TelegramStickerConverter {
       ],
       config.ffmpegTimeoutMs
     );
+  }
+
+  async removeChromaBackgroundFromVideo({
+    inputPath,
+    outputPath,
+    colorHex = '00FF00',
+    similarity = 0.35,
+    blend = 0,
+    crf = 35
+  }) {
+    await runBinary(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        inputPath,
+        '-an',
+        '-c:v',
+        'libvpx-vp9',
+        '-pix_fmt',
+        'yuva420p',
+        '-vf',
+        buildChromakeyToAlphaFilter({ colorHex, similarity, blend }),
+        '-b:v',
+        '0',
+        '-crf',
+        String(crf),
+        '-auto-alt-ref',
+        '0',
+        outputPath
+      ],
+      config.ffmpegTimeoutMs
+    );
+
+    const stats = await fs.stat(outputPath);
+    return {
+      size: stats.size,
+      outputPath,
+      metadata: {
+        type: 'video',
+        alpha: true,
+        chromaKey: {
+          colorHex,
+          similarity,
+          blend
+        }
+      },
+      attempt: {
+        label: `chromakey-${colorHex}-${similarity}-${blend}`
+      }
+    };
   }
 
   async prepareBlurredImageReference({ inputPath, outputPath, blur = '6:2' }) {
@@ -212,12 +291,12 @@ export class TelegramStickerConverter {
   }
 
   async prepareAiVideoReference({ inputPath, outputPath }) {
+    const inputArgs = await buildAlphaAwareInputArgs(inputPath);
     await runBinary(
       'ffmpeg',
       [
         '-y',
-        '-i',
-        inputPath,
+        ...inputArgs,
         '-frames:v',
         '1',
         '-an',
@@ -341,6 +420,7 @@ export class TelegramStickerConverter {
 
   async convertVideo({ inputPath, outputPath, roundedCorners = false, forceSquare = false }) {
     const metadata = await probeMedia(inputPath);
+    const inputArgs = await buildAlphaAwareInputArgs(inputPath);
     const attempts = [
       { fps: 30, crf: 34, label: 'quality-pass-1' },
       { fps: 30, crf: 38, label: 'quality-pass-2' },
@@ -352,7 +432,7 @@ export class TelegramStickerConverter {
 
     for (const attempt of attempts) {
       await runBinary('ffmpeg', buildArgs({
-        inputPath,
+        inputArgs,
         outputPath,
         fps: attempt.fps,
         crf: attempt.crf,

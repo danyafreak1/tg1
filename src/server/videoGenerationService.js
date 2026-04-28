@@ -6,6 +6,12 @@ import { AppError } from '../utils/errors.js';
 const SOFT_BLUR = '6:3';
 const MEDIUM_BLUR = '8:3';
 const HARD_BLUR = '10:3';
+const DEFAULT_CHROMA_KEY = {
+  backgroundHex: '00FF00',
+  similarity: 0.35,
+  blur: SOFT_BLUR,
+  blend: 0
+};
 const SEEDANCE_RATIOS = [
   { value: '21:9', ratio: 21 / 9 },
   { value: '16:9', ratio: 16 / 9 },
@@ -49,6 +55,29 @@ function parseRatioValue(ratio) {
   return width > 0 && height > 0 ? width / height : 1;
 }
 
+function normalizeChromaKey(value) {
+  const backgroundHex = String(value?.backgroundHex || DEFAULT_CHROMA_KEY.backgroundHex)
+    .replace(/^#/, '')
+    .trim()
+    .toUpperCase();
+  const similarity = Number(value?.similarity);
+
+  return {
+    backgroundHex: /^[0-9A-F]{6}$/.test(backgroundHex) ? backgroundHex : DEFAULT_CHROMA_KEY.backgroundHex,
+    similarity: Number.isFinite(similarity) && similarity > 0
+      ? Math.max(0.30, similarity)
+      : DEFAULT_CHROMA_KEY.similarity,
+    blur: /^\d+(?:\.\d+)?:\d+(?:\.\d+)?$/.test(String(value?.blur || ''))
+      ? String(value.blur)
+      : DEFAULT_CHROMA_KEY.blur,
+    blend: DEFAULT_CHROMA_KEY.blend
+  };
+}
+
+function buildChromaPromptSuffix(chromaKey) {
+  return ` If the reference image has a bright solid #${chromaKey.backgroundHex} background, keep that exact #${chromaKey.backgroundHex} background color flat and unchanged throughout the clip so it can be removed cleanly afterward.`;
+}
+
 export class VideoGenerationService {
   constructor({ storage, converter, provider, promptService = null }) {
     this.storage = storage;
@@ -61,13 +90,16 @@ export class VideoGenerationService {
     return path.join(config.outputsDir, `${jobId}_${suffix}${extension}`);
   }
 
-  async prepareReferenceVariants(jobId, referenceImagePath) {
+  async prepareReferenceVariants(jobId, referenceImagePath, { promptMode = 'custom', prompt = '' } = {}) {
     const cleanupPaths = [];
     const debugPaths = {
       originalInputPng: null,
       flattenedReferencePng: null,
       croppedReferencePng: null,
-      seedanceOutputMp4: null
+      seedanceOutputMp4: null,
+      chromakeyOutputWebm: null,
+      aiVideoPlanJson: null,
+      chromaKey: null
     };
 
     const inputStream = await this.converter.probeVisualStream(referenceImagePath);
@@ -102,15 +134,48 @@ export class VideoGenerationService {
         seedanceRatio,
         cleanupPaths,
         debugPaths,
-        blurSourcePath: croppedDebugPath
+        blurSourcePath: croppedDebugPath,
+      usesChromaKey: false,
+      chromaBlur: DEFAULT_CHROMA_KEY.blur,
+      plannedMotionPrompt: null
       };
     }
 
-    const flattenedDebugPath = this.createDebugPath(jobId, 'flattened-white', '.png');
+    const chromaAnalysisFileName = `seedance-chroma-source-${jobId}.png`;
+    const chromaAnalysisPublicPath = path.join(config.publicDir, chromaAnalysisFileName);
+    await fs.copyFile(referenceImagePath, chromaAnalysisPublicPath);
+    cleanupPaths.push(chromaAnalysisPublicPath);
+
+    const aiVideoPlan = this.promptService?.createAiVideoPlanFromImage
+      ? await this.promptService.createAiVideoPlanFromImage(`${config.baseUrl}/${chromaAnalysisFileName}`, {
+          promptMode,
+          prompt: promptMode === 'random' ? '' : prompt,
+          level: promptMode === 'random' ? Number(prompt) || null : null
+        })
+      : null;
+    const chromaKey = normalizeChromaKey(aiVideoPlan?.chromaKey);
+    debugPaths.chromaKey = chromaKey;
+    const planDebugPath = this.createDebugPath(jobId, 'ai-video-plan', '.json');
+    await fs.writeFile(
+      planDebugPath,
+      JSON.stringify({
+        motionPrompt: aiVideoPlan?.motionPrompt || null,
+        chromaKey: {
+          backgroundHex: chromaKey.backgroundHex,
+          similarity: chromaKey.similarity,
+          blur: chromaKey.blur
+        },
+        rawPlan: aiVideoPlan || null
+      }, null, 2),
+      'utf8'
+    );
+    debugPaths.aiVideoPlanJson = planDebugPath;
+
+    const flattenedDebugPath = this.createDebugPath(jobId, `flattened-${chromaKey.backgroundHex.toLowerCase()}`, '.png');
     await this.converter.flattenImageOnSolidBackground({
       inputPath: referenceImagePath,
       outputPath: flattenedDebugPath,
-      backgroundHex: 'FFFFFF'
+      backgroundHex: chromaKey.backgroundHex
     });
 
     debugPaths.flattenedReferencePng = flattenedDebugPath;
@@ -128,16 +193,20 @@ export class VideoGenerationService {
     await fs.copyFile(croppedDebugPath, originalPublicPath);
     cleanupPaths.push(originalPublicPath);
 
-      return {
-        original: {
-          filePath: originalPublicPath,
-          publicUrl: `${config.baseUrl}/${originalFileName}`
-        },
-        seedanceRatio,
-        cleanupPaths,
-        debugPaths,
-        blurSourcePath: croppedDebugPath
-      };
+    return {
+      original: {
+        filePath: originalPublicPath,
+        publicUrl: `${config.baseUrl}/${originalFileName}`
+      },
+      seedanceRatio,
+      cleanupPaths,
+      debugPaths,
+      blurSourcePath: croppedDebugPath,
+      usesChromaKey: true,
+      chromaKey,
+      chromaBlur: chromaKey.blur,
+      plannedMotionPrompt: aiVideoPlan?.motionPrompt || null
+    };
   }
 
   async ensureBlurVariant(jobId, referenceImagePath, cleanupPaths, { label, blur }) {
@@ -163,10 +232,21 @@ export class VideoGenerationService {
     }
 
     if (promptMode === 'random') {
-      return this.promptService.createRandomPromptFromImage(referenceImageUrl);
+      return this.promptService.createRandomPromptFromImage(referenceImageUrl, {
+        level: Number(prompt) || null
+      });
     }
 
     return this.promptService.enhanceCustomPrompt(prompt);
+  }
+
+  addChromaPromptGuard(prompt, usesChromaKey, chromaKey = DEFAULT_CHROMA_KEY) {
+    const base = sanitizePrompt(prompt);
+    if (!usesChromaKey) {
+      return base;
+    }
+
+    return `${base || 'Animate the reference as a short 3-second sticker clip.'}${buildChromaPromptSuffix(chromaKey)}`;
   }
 
   async resolveSeedanceRatio(referenceImagePath) {
@@ -196,13 +276,18 @@ export class VideoGenerationService {
       seedanceRatio,
       cleanupPaths,
       debugPaths,
-      blurSourcePath
-    } = await this.prepareReferenceVariants(jobId, referenceImagePath);
-    const effectivePrompt = await this.buildEffectivePrompt({
+      blurSourcePath,
+      usesChromaKey,
+      chromaKey,
+      chromaBlur,
+      plannedMotionPrompt
+    } = await this.prepareReferenceVariants(jobId, referenceImagePath, { promptMode, prompt });
+    const motionPrompt = plannedMotionPrompt || await this.buildEffectivePrompt({
       promptMode,
       prompt,
       referenceImageUrl: original.publicUrl
     });
+    const effectivePrompt = this.addChromaPromptGuard(motionPrompt, usesChromaKey, chromaKey);
 
     const attempts = [
       {
@@ -226,15 +311,28 @@ export class VideoGenerationService {
 
         debugPaths.seedanceOutputMp4 = generated.outputPath;
 
+        let finalOutputPath = generated.outputPath;
+        if (usesChromaKey) {
+          finalOutputPath = this.createDebugPath(jobId, 'chromakey-alpha', '.webm');
+          await this.converter.removeChromaBackgroundFromVideo({
+            inputPath: generated.outputPath,
+            outputPath: finalOutputPath,
+            colorHex: chromaKey.backgroundHex,
+            similarity: chromaKey.similarity,
+            blend: chromaKey.blend
+          });
+          debugPaths.chromakeyOutputWebm = finalOutputPath;
+        }
+
         return {
-          outputPath: generated.outputPath,
+          outputPath: finalOutputPath,
           provider: generated.provider,
           model: generated.model,
           seedanceRatio: generated.ratio || seedanceRatio,
           effectivePrompt,
           cleanupPaths: [...cleanupPaths],
           referenceImageUrl: attempt.referenceImageUrl,
-          generatedSourcePath: generated.outputPath,
+          generatedSourcePath: finalOutputPath,
           debugPaths
         };
       } catch (error) {
@@ -244,7 +342,7 @@ export class VideoGenerationService {
         if (attempt.label === 'original' && isSensitiveModerationError(error)) {
           const soft = await this.ensureBlurVariant(jobId, blurSourcePath, cleanupPaths, {
             label: 'soft',
-            blur: SOFT_BLUR
+            blur: chromaBlur || SOFT_BLUR
           });
           attempts.push({
             label: 'soft',
@@ -254,15 +352,7 @@ export class VideoGenerationService {
         }
 
         if (attempt.label === 'soft' && isSensitiveModerationError(error)) {
-          const medium = await this.ensureBlurVariant(jobId, blurSourcePath, cleanupPaths, {
-            label: 'medium',
-            blur: MEDIUM_BLUR
-          });
-          attempts.push({
-            label: 'medium',
-            referenceImageUrl: medium.publicUrl
-          });
-          continue;
+          break;
         }
 
         if (attempt.label === 'medium' && isSensitiveModerationError(error)) {

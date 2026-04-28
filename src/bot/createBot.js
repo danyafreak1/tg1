@@ -300,6 +300,14 @@ function buildAiVideoPromptInputKeyboard(userId) {
   ]);
 }
 
+function buildAiVideoRandomLevelKeyboard(userId) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🎲 1 - спокойный', `aivideorandomlevel:${userId}:1`)],
+    [Markup.button.callback('🎲 2 - живой', `aivideorandomlevel:${userId}:2`)],
+    [Markup.button.callback('🎲 3 - максимум', `aivideorandomlevel:${userId}:3`)]
+  ]);
+}
+
 function buildNewPackPreview({ title, shortName, botUsername, emoji }) {
   return [
     'Проверьте новый набор:',
@@ -519,6 +527,38 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     } catch {
       // ignore delete errors
     }
+  }
+
+  async function removeReplyMarkupQuietly(ctx) {
+    try {
+      await ctx.editMessageReplyMarkup(undefined);
+    } catch {
+      // ignore edit errors
+    }
+  }
+
+  function isMediaOutputMessage(message) {
+    return Boolean(message?.sticker || message?.video || message?.document || message?.photo?.length);
+  }
+
+  function isReadyStickerInfoMessage(message) {
+    return /Файл \.(webp|webm) уже подходит для Telegram/i.test(String(message?.text || ''));
+  }
+
+  async function clearInteractiveMessageAfterReply(ctx, sentMessagePromise) {
+    const sent = await sentMessagePromise;
+    if (isMediaOutputMessage(ctx.callbackQuery?.message) && !isReadyStickerInfoMessage(ctx.callbackQuery?.message)) {
+      await removeReplyMarkupQuietly(ctx);
+    } else {
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery?.message?.message_id);
+    }
+    return sent;
+  }
+
+  async function replyAndDeletePrevious(ctx, text, extra = undefined, previousMessageId = null) {
+    const sent = await ctx.reply(text, extra);
+    await deleteMessageQuietly(ctx.chat.id, previousMessageId);
+    return sent;
   }
 
   async function clearStatusMessage(jobId) {
@@ -792,7 +832,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     return Math.max(0, balance - pending);
   }
 
-  async function promptForAiVideoMode(ctx, draft) {
+  async function promptForAiVideoMode(ctx, draft, { previousMessageId = null } = {}) {
     await userState.updateUser(ctx.from.id, (current) => ({
       ...current,
       aiVideoDraft: draft,
@@ -806,9 +846,11 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       }
     }));
 
-    await ctx.reply(
+    await replyAndDeletePrevious(
+      ctx,
       'Как подготовить AI video sticker?',
-      buildAiVideoPromptModeKeyboard(ctx.from.id)
+      buildAiVideoPromptModeKeyboard(ctx.from.id),
+      previousMessageId
     );
   }
 
@@ -1080,6 +1122,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
 
       if (mode === 'newpack') {
         await promptForNewPackTitle(ctx);
+        await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       } else {
         if (!user.stickerSets.length) {
           await ctx.reply('Нет доступных наборов. Сначала создайте новый через /newpack.');
@@ -1087,7 +1130,12 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
           const keyboard = user.stickerSets.map((set, index) => [
             Markup.button.callback(`📦 ${getStickerSetDisplayTitle(set)}`, `pickset:${ctx.from.id}:${index}`)
           ]);
-          await ctx.reply('Выберите набор для добавления последнего стикера:', Markup.inlineKeyboard(keyboard));
+          await replyAndDeletePrevious(
+            ctx,
+            'Выберите набор для добавления последнего стикера:',
+            Markup.inlineKeyboard(keyboard),
+            ctx.callbackQuery.message?.message_id
+          );
         }
       }
 
@@ -1100,8 +1148,12 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         ...current,
         pendingAction: { type: 'newpack' }
       }));
-      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       await promptForNewPackTitle(ctx);
+      if (isMediaOutputMessage(ctx.callbackQuery.message) && !isReadyStickerInfoMessage(ctx.callbackQuery.message)) {
+        await removeReplyMarkupQuietly(ctx);
+      } else {
+        await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
+      }
       await ctx.answerCbQuery();
       return;
     }
@@ -1139,7 +1191,9 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         sourceOriginalName: pending.payload.originalName
       });
       await ctx.answerCbQuery('Открываю настройки AI video.');
-      await promptForAiVideoMode(ctx, draft);
+      await promptForAiVideoMode(ctx, draft, {
+        previousMessageId: ctx.callbackQuery.message?.message_id
+      });
       return;
     }
 
@@ -1167,9 +1221,15 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       }
 
       const draft = await prepareAiVideoReferenceFromLast(ctx.from.id);
-      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       await ctx.answerCbQuery('Открываю настройки AI video.');
-      await promptForAiVideoMode(ctx, draft);
+      if (isMediaOutputMessage(ctx.callbackQuery.message) && !isReadyStickerInfoMessage(ctx.callbackQuery.message)) {
+        await removeReplyMarkupQuietly(ctx);
+        await promptForAiVideoMode(ctx, draft);
+      } else {
+        await promptForAiVideoMode(ctx, draft, {
+          previousMessageId: ctx.callbackQuery.message?.message_id
+        });
+      }
       return;
     }
 
@@ -1182,21 +1242,58 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         return;
       }
 
-      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
-
       if (third === 'custom') {
+        await ctx.answerCbQuery('Жду ваш prompt.');
+        const promptMessage = await replyAndDeletePrevious(
+          ctx,
+          'Пришлите prompt для AI video. Я расширю его, переведу на английский под Seedance и запущу генерацию.',
+          buildAiVideoPromptInputKeyboard(ctx.from.id),
+          ctx.callbackQuery.message?.message_id
+        );
+
         await userState.updateUser(ctx.from.id, (current) => ({
           ...current,
           pendingAction: {
             type: 'ai_video_wait_custom_prompt',
-            payload: pending.payload
+            payload: {
+              ...pending.payload,
+              promptMessageId: promptMessage.message_id
+            }
           }
         }));
-        await ctx.answerCbQuery('Жду ваш prompt.');
-        await ctx.reply(
-          'Пришлите prompt для AI video. Я расширю его, переведу на английский под Seedance и запущу генерацию.',
-          buildAiVideoPromptInputKeyboard(ctx.from.id)
-        );
+        return;
+      }
+
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
+      await userState.updateUser(ctx.from.id, (current) => ({
+        ...current,
+        pendingAction: {
+          type: 'ai_video_choose_random_level',
+          payload: pending.payload
+        }
+      }));
+      await ctx.answerCbQuery('Выберите уровень случайности.');
+      await replyAndDeletePrevious(
+        ctx,
+        'Выберите уровень случайного AI video prompt:',
+        buildAiVideoRandomLevelKeyboard(ctx.from.id),
+        ctx.callbackQuery.message?.message_id
+      );
+      return;
+    }
+
+    if (action === 'aivideorandomlevel') {
+      const user = await userState.getUser(ctx.from.id);
+      const pending = user.pendingAction;
+      const level = Number(third);
+
+      if (pending?.type !== 'ai_video_choose_random_level' || !pending.payload?.referenceImagePath) {
+        await ctx.answerCbQuery('Реф для AI video не найден.');
+        return;
+      }
+
+      if (![1, 2, 3].includes(level)) {
+        await ctx.answerCbQuery('Неизвестный уровень.');
         return;
       }
 
@@ -1204,9 +1301,11 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         ...current,
         pendingAction: null
       }));
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       await ctx.answerCbQuery('Придумываю движение.');
       await enqueueAiVideoJob(ctx, pending.payload, {
-        promptMode: 'random'
+        promptMode: 'random',
+        prompt: String(level)
       });
       return;
     }
@@ -1226,10 +1325,18 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       }));
 
       await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
-      await ctx.answerCbQuery('Переключаю на случайный prompt.');
-      await enqueueAiVideoJob(ctx, pending.payload, {
-        promptMode: 'random'
-      });
+      await userState.updateUser(ctx.from.id, (current) => ({
+        ...current,
+        pendingAction: {
+          type: 'ai_video_choose_random_level',
+          payload: pending.payload
+        }
+      }));
+      await ctx.answerCbQuery('Выберите уровень случайности.');
+      await ctx.reply(
+        'Выберите уровень случайного AI video prompt:',
+        buildAiVideoRandomLevelKeyboard(ctx.from.id)
+      );
       return;
     }
 
@@ -1254,15 +1361,16 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         }
       }));
 
-      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
-      await ctx.reply(
+      await replyAndDeletePrevious(
+        ctx,
         buildStylePrompt(pending.payload.inputType || 'video'),
         Markup.inlineKeyboard([
           [
             Markup.button.callback('⬜ Обычные углы', `style:${ctx.from.id}:normal`),
             Markup.button.callback('◼ Скруглённые углы', `style:${ctx.from.id}:rounded`)
           ]
-        ])
+        ]),
+        ctx.callbackQuery.message?.message_id
       );
       await ctx.answerCbQuery(forceSquare ? 'Сделаю 1:1.' : 'Сохраню как есть.');
       return;
@@ -1298,7 +1406,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         return;
       }
 
-      await ctx.editMessageReplyMarkup(undefined);
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       await createNewPackFromPending(ctx, pending.payload);
       await ctx.answerCbQuery('Создаю набор...');
       return;
@@ -1309,7 +1417,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         ...current,
         pendingAction: { type: 'newpack' }
       }));
-      await ctx.editMessageReplyMarkup(undefined);
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
       await promptForNewPackTitle(ctx);
       await ctx.answerCbQuery('Введите новое название.');
       return;
@@ -1326,12 +1434,10 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       const keyboard = user.stickerSets.map((set, index) => [
         Markup.button.callback(`📦 ${getStickerSetDisplayTitle(set)}`, `pickset:${ctx.from.id}:${index}`)
       ]);
-      try {
-        await ctx.editMessageReplyMarkup(undefined);
-      } catch {
-        // Keep the sticker message even if Telegram refuses to edit old markup.
-      }
-      await ctx.reply('Выберите набор:', Markup.inlineKeyboard(keyboard));
+      await clearInteractiveMessageAfterReply(
+        ctx,
+        ctx.reply('Выберите набор:', Markup.inlineKeyboard(keyboard))
+      );
       await ctx.answerCbQuery();
       return;
     }
@@ -1363,6 +1469,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         }
 
         const payload = user.pendingAction.payload;
+        await deleteMessageQuietly(ctx.chat.id, payload?.promptMessageId);
         await userState.updateUser(ctx.from.id, (current) => ({
           ...current,
           pendingAction: null
@@ -1601,8 +1708,6 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       return;
     }
 
-    await clearStatusMessage(internalJob.id);
-
     if (internalJob.jobType === 'generate_video') {
       await confirmAiVideoCharge(internalJob.owner.userId, internalJob.id);
     }
@@ -1629,8 +1734,13 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
             filename: path.basename(internalJob.outputPath)
           }
         );
-      } catch {
-        // ignore preview send errors and continue with the normal flow
+      } catch (error) {
+        console.error('Failed to send generated image preview', {
+          jobId: internalJob.id,
+          chatId: internalJob.owner.chatId,
+          outputPath: internalJob.outputPath,
+          error
+        });
       }
 
       await bot.telegram.sendMessage(
@@ -1642,6 +1752,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
           aiVideoTokens: (await userState.getUser(internalJob.owner.userId)).balances?.aiVideoTokens || 0
         })
       );
+      await clearStatusMessage(internalJob.id);
       return;
     }
 
@@ -1658,16 +1769,26 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         }
       }));
 
-      try {
-        await bot.telegram.sendVideo(
-          internalJob.owner.chatId,
-          {
-            source: internalJob.outputPath,
-            filename: path.basename(internalJob.outputPath)
-          }
-        );
-      } catch {
-        // ignore preview send errors and continue with the normal flow
+      const previewVideoPath = path.extname(internalJob.outputPath).toLowerCase() === '.mp4'
+        ? internalJob.outputPath
+        : internalJob.debugPaths?.seedanceOutputMp4;
+      if (previewVideoPath) {
+        try {
+          await bot.telegram.sendVideo(
+            internalJob.owner.chatId,
+            {
+              source: previewVideoPath,
+              filename: path.basename(previewVideoPath)
+            }
+          );
+        } catch (error) {
+          console.error('Failed to send generated video preview', {
+            jobId: internalJob.id,
+            chatId: internalJob.owner.chatId,
+            outputPath: previewVideoPath,
+            error
+          });
+        }
       }
 
       await bot.telegram.sendMessage(
@@ -1679,6 +1800,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
           aiVideoTokens: (await userState.getUser(internalJob.owner.userId)).balances?.aiVideoTokens || 0
         })
       );
+      await clearStatusMessage(internalJob.id);
       return;
     }
 
@@ -1716,6 +1838,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         `Конвертация завершилась, но отправка в Telegram не удалась: ${error.message}`
       );
     }
+    await clearStatusMessage(internalJob.id);
   });
 
   backend.on('job.failed', async ({ internalJob, job }) => {
@@ -1744,11 +1867,14 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
   });
 
   async function promptForNewPackTitle(ctx) {
+    const message = await ctx.reply(`Пришлите только название набора.\nЯ сам сделаю title вида "Name | @${me.username}" и short_name по правилам Telegram.`);
     await userState.updateUser(ctx.from.id, (current) => ({
       ...current,
-      pendingAction: { type: 'newpack' }
+      pendingAction: {
+        type: 'newpack',
+        promptMessageId: message.message_id
+      }
     }));
-    await ctx.reply(`Пришлите только название набора.\nЯ сам сделаю title вида "Name | @${me.username}" и short_name по правилам Telegram.`);
   }
 
   async function previewNewPack(ctx, input) {
@@ -1775,6 +1901,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         }
       }));
 
+      await deleteMessageQuietly(ctx.chat.id, user.pendingAction?.promptMessageId);
       await ctx.reply(
         buildNewPackPreview({
           title: parsed.title,
