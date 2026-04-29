@@ -175,6 +175,39 @@ function extractMedia(message) {
   return null;
 }
 
+function extractCustomEmojiIds(message) {
+  const entities = [
+    ...(message.entities || []),
+    ...(message.caption_entities || [])
+  ];
+
+  return [
+    ...new Set(
+      entities
+        .filter((entity) => entity.type === 'custom_emoji' && entity.custom_emoji_id)
+        .map((entity) => entity.custom_emoji_id)
+    )
+  ];
+}
+
+function isEmojiOnlyText(text) {
+  const normalized = String(text || '')
+    .replace(/[\s\u200d\ufe0e\ufe0f]+/g, '');
+
+  return Boolean(normalized) && /^[\p{Extended_Pictographic}\p{Emoji_Presentation}]+$/u.test(normalized);
+}
+
+function getCustomEmojiSourceName(sticker) {
+  const id = sticker.custom_emoji_id || sticker.file_unique_id || sticker.file_id || 'custom-emoji';
+  if (sticker.is_video) {
+    return `${id}.webm`;
+  }
+  if (sticker.is_animated) {
+    return `${id}.tgs`;
+  }
+  return `${id}.webp`;
+}
+
 async function downloadTelegramFile(ctx, storage, media) {
   const fileUrl = await ctx.telegram.getFileLink(media.fileId);
   const response = await fetch(fileUrl.toString());
@@ -598,6 +631,12 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
   }
 
   async function enqueuePromptOnlyGeneration(ctx, prompt, existingStatusMessageId = null) {
+    await userState.updateUser(ctx.from.id, (current) => ({
+      ...current,
+      lastConverted: null,
+      aiVideoDraft: null
+    }));
+
     const statusMessageId = existingStatusMessageId || (await createStatusMessage(ctx)).message_id;
     const job = await backend.createJobFromUpload({
       inputPath: null,
@@ -636,6 +675,63 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     });
     await rememberStatusMessage(ctx.chat.id, job.id, statusMessage.message_id);
     await updateStatusMessage(job);
+  }
+
+  async function handleCustomEmojiInput(ctx, customEmojiIds) {
+    const stickers = await ctx.telegram.callApi('getCustomEmojiStickers', {
+      custom_emoji_ids: customEmojiIds.slice(0, 1)
+    });
+    const sticker = Array.isArray(stickers) ? stickers[0] : null;
+
+    if (!sticker?.file_id) {
+      await ctx.reply('Не удалось получить файл custom emoji из Telegram.');
+      return;
+    }
+
+    if (sticker.is_animated && !sticker.is_video) {
+      await ctx.reply('Этот custom emoji в формате .tgs (Lottie). Пока принимаю только static WebP и video WebM emoji, которые можно превратить в PNG.');
+      return;
+    }
+
+    const sourceName = getCustomEmojiSourceName(sticker);
+    const sourcePath = await downloadTelegramFile(ctx, storage, {
+      fileId: sticker.file_id,
+      fileName: sourceName,
+      inputType: sticker.is_video ? 'video' : 'image'
+    });
+    const pngPath = storage.createUploadPath(`custom-emoji-${path.basename(sourceName, path.extname(sourceName))}.png`);
+
+    await backend.converter.prepareAiVideoReference({
+      inputPath: sourcePath,
+      outputPath: pngPath
+    });
+
+    await userState.updateUser(ctx.from.id, (current) => ({
+      ...current,
+      lastConverted: null,
+      aiVideoDraft: null,
+      pendingAction: {
+        type: 'choose_layout',
+        payload: {
+          inputPath: pngPath,
+          originalName: path.basename(pngPath),
+          inputType: 'image',
+          forceSquare: false,
+          sourcePath,
+          sourceOriginalName: sourceName
+        }
+      }
+    }));
+
+    const user = await userState.getUser(ctx.from.id);
+    await ctx.reply(
+      'Custom emoji принят как PNG-референс. Я увеличил его так, чтобы меньшая сторона была минимум 300px.',
+      buildLayoutKeyboard({
+        userId: ctx.from.id,
+        inputType: 'image',
+        aiVideoTokens: user.balances?.aiVideoTokens || 0
+      })
+    );
   }
 
   async function promptForPackCorners(ctx, mode) {
@@ -990,6 +1086,8 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
 
     await userState.updateUser(ctx.from.id, (current) => ({
       ...current,
+      lastConverted: null,
+      aiVideoDraft: null,
       pendingAction: { type: 'generate_sticker_wait_prompt_only' }
     }));
     await ctx.reply('Пришлите prompt для text-to-image генерации, и я верну готовый стикер.');
@@ -1544,6 +1642,22 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         return;
       }
 
+      const customEmojiIds = extractCustomEmojiIds(ctx.message);
+      if (customEmojiIds.length) {
+        try {
+          await handleCustomEmojiInput(ctx, customEmojiIds);
+        } catch (error) {
+          console.error('custom emoji handling error', error);
+          await ctx.reply(`Не удалось принять custom emoji: ${error.message}`);
+        }
+        return;
+      }
+
+      if (isEmojiOnlyText(ctx.message.text)) {
+        await ctx.reply('Обычный emoji не содержит файла картинки. Пришлите custom emoji, sticker, PNG/WebP/WebM или картинку.');
+        return;
+      }
+
       if (chatCompletionService) {
         const provisionalStatusMessage = isLikelyTextToImageRequest(ctx.message.text)
           ? await createStatusMessage(ctx)
@@ -1596,6 +1710,11 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
     const user = await userState.getUser(ctx.from.id);
     const media = extractMedia(ctx.message);
     if (!media) {
+      if (ctx.message.sticker) {
+        await ctx.reply('Этот sticker сейчас не поддерживается как файл. Пришлите static/video sticker, PNG/WebP/WebM или custom emoji.');
+        return;
+      }
+
       return next();
     }
 
@@ -1609,6 +1728,8 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         const inputPath = await downloadTelegramFile(ctx, storage, media);
         await userState.updateUser(ctx.from.id, (current) => ({
           ...current,
+          lastConverted: null,
+          aiVideoDraft: null,
           pendingAction: {
             type: 'generate_sticker_wait_prompt',
             payload: {
@@ -1627,6 +1748,7 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         await userState.updateUser(ctx.from.id, (current) => ({
           ...current,
           pendingAction: null,
+          aiVideoDraft: null,
           lastConverted: {
             path: inputPath,
             jobId: null,
@@ -1649,6 +1771,8 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       if (media.inputType === 'video') {
         await userState.updateUser(ctx.from.id, (current) => ({
           ...current,
+          lastConverted: null,
+          aiVideoDraft: null,
           pendingAction: {
             type: 'choose_layout',
             payload: {
@@ -1670,6 +1794,8 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       } else {
         await userState.updateUser(ctx.from.id, (current) => ({
           ...current,
+          lastConverted: null,
+          aiVideoDraft: null,
           pendingAction: {
             type: 'choose_layout',
             payload: {

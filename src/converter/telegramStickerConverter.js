@@ -425,7 +425,11 @@ export class TelegramStickerConverter {
       { fps: 30, crf: 34, label: 'quality-pass-1' },
       { fps: 30, crf: 38, label: 'quality-pass-2' },
       { fps: 30, crf: 42, label: 'quality-pass-3' },
-      { fps: 24, crf: 46, label: 'size-pass-4' }
+      { fps: 24, crf: 46, label: 'size-pass-4' },
+      { fps: 20, crf: 50, label: 'aggressive-size-pass-5' },
+      { fps: 18, crf: 54, label: 'aggressive-size-pass-6' },
+      { fps: 15, crf: 58, label: 'aggressive-size-pass-7' },
+      { fps: 12, crf: 60, label: 'last-resort-size-pass-8' }
     ];
 
     let lastSize = 0;
