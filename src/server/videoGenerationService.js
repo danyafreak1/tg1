@@ -3,12 +3,12 @@ import { promises as fs } from 'node:fs';
 import { config } from '../config/env.js';
 import { AppError } from '../utils/errors.js';
 
-const SOFT_BLUR = '6:3';
+const SOFT_BLUR = '0:0';
 const MEDIUM_BLUR = '8:3';
 const HARD_BLUR = '10:3';
 const DEFAULT_CHROMA_KEY = {
   backgroundHex: '00FF00',
-  similarity: 0.35,
+  similarity: 0.30,
   blur: SOFT_BLUR,
   blend: 0
 };
@@ -260,6 +260,79 @@ export class VideoGenerationService {
     }
 
     return config.acedataVideoRatio;
+  }
+
+  async removeChromaFromUserVideo({ jobId, inputPath, outputPath }) {
+    if (!inputPath) {
+      throw new AppError('Video is required for chromakey removal.', 400);
+    }
+
+    if (!this.promptService?.chooseVideoChromaRemovalSettings) {
+      throw new AppError('Chroma-key analyzer is not configured.', 500);
+    }
+
+    const cleanupPaths = [];
+    const frameDebugPath = this.createDebugPath(jobId, 'chroma-frame', '.png');
+    await this.converter.extractFirstFrame({
+      inputPath,
+      outputPath: frameDebugPath
+    });
+
+    const frameFileName = `video-chroma-frame-${jobId}.png`;
+    const framePublicPath = path.join(config.publicDir, frameFileName);
+    await fs.copyFile(frameDebugPath, framePublicPath);
+    cleanupPaths.push(framePublicPath);
+
+    const rawDecision = await this.promptService.chooseVideoChromaRemovalSettings(`${config.baseUrl}/${frameFileName}`);
+    const chromaKey = normalizeChromaKey(rawDecision);
+    const decision = {
+      ...rawDecision,
+      backgroundHex: chromaKey.backgroundHex,
+      similarity: chromaKey.similarity,
+      blend: chromaKey.blend
+    };
+
+    const decisionDebugPath = this.createDebugPath(jobId, 'user-video-chroma-plan', '.json');
+    await fs.writeFile(
+      decisionDebugPath,
+      JSON.stringify({
+        ...decision,
+        frame: frameDebugPath
+      }, null, 2),
+      'utf8'
+    );
+
+    if (!decision.confident) {
+      throw new AppError(
+        `Chromakey removal is not safe for this video${decision.reason ? `: ${decision.reason}` : '.'}`,
+        400
+      );
+    }
+
+    const removed = await this.converter.removeChromaBackgroundFromVideo({
+      inputPath,
+      outputPath,
+      colorHex: chromaKey.backgroundHex,
+      similarity: chromaKey.similarity,
+      blend: chromaKey.blend
+    });
+
+    return {
+      ...removed,
+      format: 'video',
+      generatedSourcePath: outputPath,
+      cleanupPaths,
+      debugPaths: {
+        chromaFramePng: frameDebugPath,
+        chromaPlanJson: decisionDebugPath,
+        chromaKey: {
+          backgroundHex: chromaKey.backgroundHex,
+          similarity: chromaKey.similarity,
+          blend: chromaKey.blend,
+          reason: decision.reason || null
+        }
+      }
+    };
   }
 
   async generateVideo({ jobId, referenceImagePath, promptMode = 'custom', prompt = '' }) {

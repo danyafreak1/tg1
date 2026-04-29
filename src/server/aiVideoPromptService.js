@@ -5,6 +5,8 @@ const CUSTOM_PROMPT_SYSTEM = `You adapt user requests into short English Seedanc
 Rules:
 - Output only one short English direction for the requested effect or motion.
 - Preserve the main subject and its recognizable identity, but small pose/expression changes are allowed.
+- Do not introduce a woman, man, person, character, animal, face, or body if it is not clearly visible in the reference.
+- Do not turn an object, icon, logo, sticker, prop, or abstract subject into a human character.
 - You may add a slightly more imaginative, playful, or surprising action if it still feels connected to the reference.
 - Small temporary effects, motion accents, props already implied by the image, or expressive reactions are allowed.
 - The background should remain generally consistent, but you do not need to describe it.
@@ -23,6 +25,9 @@ Your job:
 - Then decide what, in your judgment, should naturally happen next in a short sticker-like clip for that exact subject.
 - Base the motion on what is actually visible in the image. Do not ignore the reference.
 - Preserve the main subject and its recognizable identity, but small pose/expression changes are allowed.
+- Do not introduce a woman, man, person, character, animal, face, or body if it is not clearly visible in the reference.
+- Do not turn an object, icon, logo, sticker, prop, or abstract subject into a human character.
+- If the subject is ambiguous, animate the visible shapes/details only instead of inventing gender, age, or identity.
 - You may add a slightly more imaginative, playful, or surprising action if it still feels connected to the reference.
 - Small temporary effects, motion accents, props already implied by the image, or expressive reactions are allowed.
 - The background should remain generally consistent, but you do not need to describe it.
@@ -34,35 +39,34 @@ const DEFAULT_CUSTOM_DIRECTION = 'Add one subtle, believable motion with minimal
 const DEFAULT_RANDOM_MOTION = 'Add a subtle blink and a slight natural movement.';
 const DEFAULT_CHROMA_KEY_SETTINGS = {
   backgroundHex: '00FF00',
-  similarity: 0.35,
-  blur: '6:3'
+  similarity: 0.30,
+  blur: '0:0'
 };
 const CHROMA_KEY_SYSTEM = `You choose a temporary chroma-key background for a transparent sticker reference before image-to-video generation.
 
 Goal:
 - Pick a solid fill color that is least likely to overlap with the visible subject colors.
-- Pick an ffmpeg chromakey similarity value.
-- Pick an ffmpeg boxblur value for safety fallback/reference blur, formatted as radius:power.
 
 Rules:
 - Avoid any color that appears in the subject, semi-transparent antialiasing edges, clothes, props, hair, skin, eyes, shadows, highlights, or important details.
 - Choose any pure, saturated, solid RGB hex color that is clearly absent from the entire visible subject and its edges.
 - The best color is not just different from the main object; it must also avoid edge/outline colors so chromakey will not eat the subject.
 - Prefer very artificial chroma-like colors over natural colors.
-- Choose similarity yourself based on the subject and background color, but it must be at least 0.30.
-- Choose blur yourself; use lower blur for safe/clean images and stronger blur only when needed.
 - Output only compact JSON, no markdown, no explanation.
 
 Example:
-{"backgroundHex":"00FF00","similarity":0.35,"blur":"6:3"}`;
+{"backgroundHex":"00FF00"}`;
 const AI_VIDEO_PLAN_SYSTEM = `You prepare one compact plan for a transparent reference-based Seedance sticker video.
 
 Return only compact JSON with exactly these fields:
-{"motionPrompt":"...","backgroundHex":"...","similarity":0.33,"blur":"6:3"}
+{"motionPrompt":"...","backgroundHex":"..."}
 
 motionPrompt rules:
 - Write one vivid English Seedance direction for a 3-second sticker clip.
 - Preserve the main visible subject and recognizable identity.
+- Do not introduce a woman, man, person, character, animal, face, or body if it is not clearly visible in the reference.
+- Do not turn an object, icon, logo, sticker, prop, or abstract subject into a human character.
+- If the subject is ambiguous, animate the visible shapes/details only instead of inventing gender, age, or identity.
 - Small pose/expression changes, temporary effects, motion accents, or playful actions are allowed if connected to the reference.
 - Avoid replacing the subject, changing the scene completely, unrelated characters, explicit sexual content, graphic violence, or hostile gestures.
 - If the user gave a custom prompt, adapt it to English while preserving the requested safe transformation/effect.
@@ -73,11 +77,20 @@ chroma rules:
 - Choose any pure, saturated, solid RGB hex color that is far from the entire visible subject and its outline/edges.
 - The best background color is the one least likely to be removed from the subject by chromakey.
 - Prefer very artificial chroma-like colors over natural colors.
-- Choose ffmpeg chromakey similarity yourself based on the subject and chosen color, but it must be at least 0.30.
-- Choose ffmpeg boxblur value yourself for moderation fallback/reference blur, formatted radius:power, for example "0:0", "4:2", "6:3", "8:3", or "10:3".
-- Use lower blur for safe/clean images and stronger blur only if the image may need softened details.
 
 Do not return markdown or explanations.`;
+const VIDEO_CHROMA_REMOVAL_SYSTEM = `You inspect a single video frame and decide whether it has a removable chroma-key background.
+
+Return only compact JSON with exactly these fields:
+{"confident":true,"backgroundHex":"00FF00","reason":"short reason"}
+
+Rules:
+- Set confident=true only when the frame has a mostly solid artificial chroma background that can be removed safely.
+- The background should be a flat or near-flat color behind the subject, such as green, blue, magenta, cyan, or another saturated studio/key color.
+- Do not guess if the background is natural, detailed, gradient-heavy, similar to the subject, or only a tiny colored area.
+- Pick the dominant removable background color as backgroundHex.
+- If not confident, return confident=false with the best observed backgroundHex if useful and a short reason.
+- Do not mention blur or boxblur.`;
 const RANDOM_PROMPT_SAMPLING_PROFILES = [
   { temperature: 0.85, topP: 0.9 },
   { temperature: 1.15, topP: 1.0 },
@@ -191,17 +204,10 @@ function normalizeChromaKeySettings(value) {
   const backgroundHex = /^[0-9A-F]{6}$/.test(rawHex)
     ? rawHex
     : DEFAULT_CHROMA_KEY_SETTINGS.backgroundHex;
-  const similarity = Number(value?.similarity);
-  const blur = String(value?.blur || '')
-    .trim()
-    .match(/^\d+(?:\.\d+)?:\d+(?:\.\d+)?$/)?.[0] || DEFAULT_CHROMA_KEY_SETTINGS.blur;
-
   return {
     backgroundHex,
-    similarity: Number.isFinite(similarity) && similarity > 0
-      ? Number(Math.max(0.30, similarity).toFixed(3))
-      : DEFAULT_CHROMA_KEY_SETTINGS.similarity,
-    blur
+    similarity: DEFAULT_CHROMA_KEY_SETTINGS.similarity,
+    blur: DEFAULT_CHROMA_KEY_SETTINGS.blur
   };
 }
 
@@ -218,6 +224,23 @@ function normalizeAiVideoPlan(value, { promptMode = 'custom', prompt = '' } = {}
   return {
     motionPrompt: normalizeDirectionLine(value?.motionPrompt || value?.prompt || value?.direction, fallbackMotion),
     chromaKey
+  };
+}
+
+function normalizeVideoChromaRemovalSettings(value) {
+  const rawHex = String(value?.backgroundHex || value?.color || '')
+    .replace(/^#/, '')
+    .trim()
+    .toUpperCase();
+  const confident = value?.confident === true;
+
+  return {
+    confident,
+    backgroundHex: /^[0-9A-F]{6}$/.test(rawHex)
+      ? rawHex
+      : DEFAULT_CHROMA_KEY_SETTINGS.backgroundHex,
+    similarity: DEFAULT_CHROMA_KEY_SETTINGS.similarity,
+    reason: String(value?.reason || '').replace(/\s+/g, ' ').trim().slice(0, 240)
   };
 }
 
@@ -360,7 +383,7 @@ export class AiVideoPromptService {
           content: [
             {
               type: 'text',
-              text: 'Look at the visible subject only. Choose the best solid chroma-key background color and ffmpeg chromakey similarity value.'
+              text: 'Look at the visible subject only. Choose the best solid chroma-key background color.'
             },
             {
               type: 'image_url',
@@ -378,6 +401,50 @@ export class AiVideoPromptService {
       return normalizeChromaKeySettings(extractJsonObject(response));
     } catch {
       return { ...DEFAULT_CHROMA_KEY_SETTINGS };
+    }
+  }
+
+  async chooseVideoChromaRemovalSettings(frameImageUrl) {
+    if (!frameImageUrl) {
+      return {
+        confident: false,
+        backgroundHex: DEFAULT_CHROMA_KEY_SETTINGS.backgroundHex,
+        similarity: DEFAULT_CHROMA_KEY_SETTINGS.similarity,
+        reason: 'No frame image URL was provided.'
+      };
+    }
+
+    try {
+      const response = await this.requestWithProviders([
+        { role: 'system', content: VIDEO_CHROMA_REMOVAL_SYSTEM },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Inspect this video frame. If it has a clearly removable chroma-key background, choose the exact background color. If not, return confident=false.'
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: frameImageUrl
+              }
+            }
+          ]
+        }
+      ], {
+        temperature: 0.1,
+        topP: 0.5
+      });
+
+      return normalizeVideoChromaRemovalSettings(extractJsonObject(response));
+    } catch (error) {
+      return {
+        confident: false,
+        backgroundHex: DEFAULT_CHROMA_KEY_SETTINGS.backgroundHex,
+        similarity: DEFAULT_CHROMA_KEY_SETTINGS.similarity,
+        reason: error?.message || 'Chroma analysis failed.'
+      };
     }
   }
 

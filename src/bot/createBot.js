@@ -26,14 +26,21 @@ function helpText(baseUrl) {
   ].join('\n');
 }
 
-function buildResultKeyboard(userId) {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('AI Video Sticker', `aivideofromlast:${userId}`)],
-    [
-      Markup.button.callback('Create New Pack', `newpack:${userId}`),
-      Markup.button.callback('Add To Existing', `addexisting:${userId}`)
-    ]
+function buildResultKeyboard(userId, { canRemoveChromaKey = false } = {}) {
+  const rows = [
+    [Markup.button.callback('AI Video Sticker', `aivideofromlast:${userId}`)]
+  ];
+
+  if (canRemoveChromaKey) {
+    rows.push([Markup.button.callback('Убрать chromakey', `chromakeyfromlast:${userId}`)]);
+  }
+
+  rows.push([
+    Markup.button.callback('Create New Pack', `newpack:${userId}`),
+    Markup.button.callback('Add To Existing', `addexisting:${userId}`)
   ]);
+
+  return Markup.inlineKeyboard(rows);
 }
 
 function buildCornerChoiceKeyboard(userId, mode) {
@@ -300,7 +307,7 @@ function formatTokenWord(count) {
   return 'tokens';
 }
 
-function buildLayoutKeyboard({ userId, inputType, aiVideoTokens = 0 }) {
+function buildLayoutKeyboard({ userId, inputType, aiVideoTokens = 0, allowChromaKey = true }) {
   const rows = [];
 
   if (inputType === 'image') {
@@ -309,6 +316,10 @@ function buildLayoutKeyboard({ userId, inputType, aiVideoTokens = 0 }) {
         `AI Video Sticker - ${aiVideoTokens} ${formatTokenWord(aiVideoTokens)}`,
         `aivideo:${userId}`
       )
+    ]);
+  } else if (inputType === 'video' && allowChromaKey) {
+    rows.push([
+      Markup.button.callback('Убрать chromakey', `chromakey:${userId}`)
     ]);
   }
 
@@ -671,6 +682,26 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         inputType: payload.inputType || 'video',
         roundedCorners,
         forceSquare: Boolean(payload.forceSquare)
+      }
+    });
+    await rememberStatusMessage(ctx.chat.id, job.id, statusMessage.message_id);
+    await updateStatusMessage(job);
+  }
+
+  async function enqueueChromaKeyVideoJob(ctx, payload) {
+    const statusMessage = await createStatusMessage(ctx);
+    const job = await backend.createJobFromUpload({
+      inputPath: payload.inputPath,
+      originalName: payload.originalName,
+      source: 'bot',
+      owner: {
+        chatId: ctx.chat.id,
+        userId: ctx.from.id
+      },
+      options: {
+        jobType: 'chroma_key_video',
+        inputType: 'video',
+        outputExtension: '.webm'
       }
     });
     await rememberStatusMessage(ctx.chat.id, job.id, statusMessage.message_id);
@@ -1331,6 +1362,57 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
       return;
     }
 
+    if (action === 'chromakey') {
+      const user = await userState.getUser(ctx.from.id);
+      const pending = user.pendingAction;
+
+      if (pending?.type !== 'choose_layout' || !pending.payload) {
+        await ctx.answerCbQuery('Видео для chromakey не найдено.');
+        return;
+      }
+
+      if ((pending.payload.inputType || 'video') !== 'video') {
+        await ctx.answerCbQuery('Chromakey removal работает только для видео.');
+        return;
+      }
+
+      await userState.updateUser(ctx.from.id, (current) => ({
+        ...current,
+        pendingAction: null
+      }));
+      await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
+      await ctx.answerCbQuery('Проверяю первый кадр.');
+      await enqueueChromaKeyVideoJob(ctx, pending.payload);
+      return;
+    }
+
+    if (action === 'chromakeyfromlast') {
+      const user = await userState.getUser(ctx.from.id);
+
+      if (!user.lastConverted?.path || user.lastConverted?.stickerFormat !== 'video') {
+        await ctx.answerCbQuery('Видео для chromakey не найдено.');
+        return;
+      }
+
+      await userState.updateUser(ctx.from.id, (current) => ({
+        ...current,
+        pendingAction: null
+      }));
+
+      if (isMediaOutputMessage(ctx.callbackQuery.message) && !isReadyStickerInfoMessage(ctx.callbackQuery.message)) {
+        await removeReplyMarkupQuietly(ctx);
+      } else {
+        await deleteMessageQuietly(ctx.chat.id, ctx.callbackQuery.message?.message_id);
+      }
+      await ctx.answerCbQuery('Проверяю первый кадр.');
+      await enqueueChromaKeyVideoJob(ctx, {
+        inputPath: user.lastConverted.path,
+        originalName: user.lastConverted.sourceOriginalName || path.basename(user.lastConverted.path),
+        inputType: 'video'
+      });
+      return;
+    }
+
     if (action === 'aivideomode') {
       const user = await userState.getUser(ctx.from.id);
       const pending = user.pendingAction;
@@ -1763,7 +1845,9 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
 
         await ctx.reply(
           `Файл ${media.readyStickerFormat === 'static' ? '.webp' : '.webm'} уже подходит для Telegram. Можно сразу добавить его в набор.`,
-          buildResultKeyboard(ctx.from.id)
+          buildResultKeyboard(ctx.from.id, {
+            canRemoveChromaKey: media.readyStickerFormat === 'video'
+          })
         );
         return;
       }
@@ -1923,6 +2007,34 @@ export async function createBot({ backend, storage, userState, chatCompletionSer
         buildLayoutKeyboard({
           userId: internalJob.owner.userId,
           inputType: 'video',
+          allowChromaKey: false,
+          aiVideoTokens: (await userState.getUser(internalJob.owner.userId)).balances?.aiVideoTokens || 0
+        })
+      );
+      await clearStatusMessage(internalJob.id);
+      return;
+    }
+
+    if (internalJob.jobType === 'chroma_key_video') {
+      await userState.updateUser(internalJob.owner.userId, (current) => ({
+        ...current,
+        pendingAction: {
+          type: 'choose_layout',
+          payload: {
+            inputPath: internalJob.outputPath,
+            originalName: internalJob.originalName || 'chromakey-removed.webm',
+            inputType: 'video'
+          }
+        }
+      }));
+
+      await bot.telegram.sendMessage(
+        internalJob.owner.chatId,
+        'Chromakey удалён. Теперь выберите формат видео-стикера:',
+        buildLayoutKeyboard({
+          userId: internalJob.owner.userId,
+          inputType: 'video',
+          allowChromaKey: false,
           aiVideoTokens: (await userState.getUser(internalJob.owner.userId)).balances?.aiVideoTokens || 0
         })
       );

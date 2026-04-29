@@ -213,7 +213,7 @@ export class TelegramStickerConverter {
     inputPath,
     outputPath,
     colorHex = '00FF00',
-    similarity = 0.35,
+    similarity = 0.30,
     blend = 0,
     crf = 35
   }) {
@@ -256,6 +256,36 @@ export class TelegramStickerConverter {
       },
       attempt: {
         label: `chromakey-${colorHex}-${similarity}-${blend}`
+      }
+    };
+  }
+
+  async extractFirstFrame({ inputPath, outputPath }) {
+    await runBinary(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        inputPath,
+        '-frames:v',
+        '1',
+        '-an',
+        '-vf',
+        buildAiVideoReferenceFilter(),
+        outputPath
+      ],
+      config.ffmpegTimeoutMs
+    );
+
+    const stats = await fs.stat(outputPath);
+    return {
+      size: stats.size,
+      outputPath,
+      metadata: {
+        type: 'image'
+      },
+      attempt: {
+        label: 'first-frame'
       }
     };
   }

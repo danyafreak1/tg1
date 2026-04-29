@@ -236,16 +236,19 @@ export class ChatCompletionService {
     }
 
     const parsed = parseAssistantResponse(answer);
-    const historyAssistantMessage = parsed.mode === 'generate_image'
-      ? '[image generation dispatched]'
-      : parsed.answer;
+    if (parsed.mode === 'generate_image') {
+      return {
+        ...parsed,
+        nextHistory: effectiveHistory
+      };
+    }
 
     return {
       ...parsed,
       nextHistory: [
         ...effectiveHistory,
         { role: 'user', content: trimmedMessage },
-        { role: 'assistant', content: historyAssistantMessage }
+        { role: 'assistant', content: parsed.answer }
       ].slice(-HISTORY_LIMIT)
     };
   }

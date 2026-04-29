@@ -60,6 +60,8 @@ export class BackendService extends EventEmitter {
         ? await this.handleGeneratedStickerJob(job)
         : job.jobType === 'generate_video'
           ? await this.handleGeneratedVideoJob(job)
+        : job.jobType === 'chroma_key_video'
+          ? await this.handleChromaKeyVideoJob(job)
         : job.jobType === 'generate_image'
           ? await this.handleGeneratedImageJob(job)
           : await this.converter.convert({
@@ -218,6 +220,23 @@ export class BackendService extends EventEmitter {
       cleanupPaths: generated.cleanupPaths || [],
       debugPaths: generated.debugPaths || null
     };
+  }
+
+  async handleChromaKeyVideoJob(job) {
+    if (!this.videoGenerationService) {
+      throw new AppError('Chroma-key video service is not configured.', 500);
+    }
+
+    job.progressStage = 'converting';
+    job.progressDetail = 'Analyzing chroma-key frame';
+    job.updatedAt = new Date().toISOString();
+    this.emit('job.updated', { job: this.toPublicJob(job), internalJob: job });
+
+    return this.videoGenerationService.removeChromaFromUserVideo({
+      jobId: job.id,
+      inputPath: job.inputPath,
+      outputPath: job.outputPath
+    });
   }
 
   getJob(id) {

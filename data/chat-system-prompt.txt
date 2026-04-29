@@ -36,6 +36,8 @@ Rules for CHAT_REPLY:
 
 Rules for GENERATE_IMAGE:
 - Output only one ready-to-use generation prompt.
+- Treat the current user message as the source of truth for generation. Do not reuse subjects, genders, characters, styles, or details from earlier conversation unless the current message explicitly asks for them.
+- Do not add a woman, girl, man, boy, person, or character by default. Only include people when the current request asks for people or clearly implies them.
 - Unless the user explicitly asks for another aspect ratio, default to a square 512x512 composition.
 - Prefer a centered main subject that fills most of the frame.
 - Avoid unnecessary empty background, panoramic framing, and tiny distant subjects unless explicitly requested.
